@@ -1,0 +1,56 @@
+id = "tsangpo.ime-keeper"
+name = "IME Keeper"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Remember the macOS input source for each Herdr pane"
+platforms = ["macos"]
+
+[[build]]
+command = ["swift", "build", "-c", "release"]
+
+[[startup]]
+command = [".build/release/ime-keeper", "focus"]
+
+[[events]]
+on = "pane.focused"
+command = [".build/release/ime-keeper", "event"]
+
+[[events]]
+on = "pane.closed"
+command = [".build/release/ime-keeper", "event"]
+
+[[events]]
+on = "pane.moved"
+command = [".build/release/ime-keeper", "event"]
+
+[[events]]
+on = "tab.closed"
+command = [".build/release/ime-keeper", "event"]
+
+[[events]]
+on = "workspace.closed"
+command = [".build/release/ime-keeper", "event"]
+
+[[actions]]
+id = "status"
+title = "IME Keeper Status"
+contexts = ["pane"]
+command = [".build/release/ime-keeper", "status"]
+
+[[actions]]
+id = "list-input-sources"
+title = "List Input Sources"
+contexts = ["pane"]
+command = [".build/release/ime-keeper", "list-input-sources"]
+
+[[actions]]
+id = "forget-current-pane"
+title = "Forget Current Pane Input Source"
+contexts = ["pane"]
+command = [".build/release/ime-keeper", "forget-current-pane"]
+
+[[actions]]
+id = "forget-session"
+title = "Forget All Session Input Sources"
+contexts = ["pane"]
+command = [".build/release/ime-keeper", "forget-session"]

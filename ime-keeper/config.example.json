@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "command": "codex",
+      "inputSourceID": "com.apple.keylayout.ABC"
+    }
+  ]
+}
