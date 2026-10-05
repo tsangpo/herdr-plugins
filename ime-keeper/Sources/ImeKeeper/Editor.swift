@@ -1,7 +1,7 @@
 import Foundation
 
 /// Transport-independent identities. Local transport uses sourceID "local" and
-/// the existing socket hash; a future SSH adapter must supply its own namespace.
+/// the existing socket hash; the SSH adapter supplies a host/session namespace.
 struct EditorSession: Codable, Equatable {
     let sourceID: String
     let sessionID: String

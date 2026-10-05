@@ -4,7 +4,8 @@ Remembers the selected macOS input source for each Herdr pane and restores it on
 
 Optional Neovim / LazyVim integration switches to ABC in command modes and restores
 your editing input source in Insert / Replace. Requires macOS, Neovim 0.10+, and
-the enabled Herdr plugin. Vim is not supported.
+the enabled Herdr plugin for local integration. Remote mode requires Herdr 0.9.3+
+on both hosts, system OpenSSH with Unix socket forwarding, and Linux Neovim. Vim is not supported.
 
 ## Setup
 
@@ -40,25 +41,33 @@ vim.opt.runtimepath:prepend("/absolute/path/to/herdr-plugins/ime-keeper/nvim")
 require("ime_keeper").setup()
 ```
 
-For LazyVim, create `lua/plugins/ime-keeper.lua`:
+For LazyVim / lazy.nvim, create `lua/plugins/ime-keeper.lua` on each host
+where you run Neovim:
 
 ```lua
 return {
   {
+    "tsangpo/herdr-plugins",
     name = "ime-keeper",
-    dir = "/absolute/path/to/herdr-plugins/ime-keeper/nvim",
+    main = "ime_keeper",
     lazy = false,
-    config = function()
-      require("ime_keeper").setup()
-    end,
+    opts = {},
   },
 }
 ```
 
-For a GitHub-managed Herdr installation, use its installed `ime-keeper/nvim`
-directory instead. Do not point LazyVim at the Swift package root: `nvim` is the
-Neovim runtime directory. The configuration snippets are opt-in; this plugin
-does not edit your Neovim configuration.
+Run `:Lazy sync` to download the Lua integration, then restart Neovim. Update
+with `:Lazy update ime-keeper`; lazy.nvim records the revision in `lazy-lock.json`.
+The repository-root loader exposes the runtime in `ime-keeper/nvim`, so no
+manual clone, file copying, absolute runtime path, or Swift build is required
+on the remote host. The Mac Herdr plugin and the Neovim integration are installed
+and updated separately; keep both on compatible revisions.
+
+If replacing an older local `dir` specification, remove that specification and
+any manual `runtimepath:prepend` for IME Keeper to avoid loading a stale copy.
+For local development, replace the repository string with
+`dir = "/absolute/path/to/herdr-plugins"`; keep `main`, `lazy`, and `opts` as above.
+Directly adding `ime-keeper/nvim` to runtimepath also remains supported.
 
 | Situation | Input source |
 | --- | --- |
@@ -75,7 +84,7 @@ rewrite mappings or Neovim's `iminsert` / `imsearch` settings. Input-source IDs,
 not an IME's internal Chinese/English toggle, are remembered. Mode switching is
 event-driven, not continuous enforcement of ABC after a manual change in Normal.
 
-The Lua module does nothing outside a local macOS Herdr pane. It obtains connection
+For local macOS Herdr panes, the Lua module obtains connection
 context through the `editor-context` action once, waiting at most two seconds for
 the matching command log. Mode reports call the Swift executable directly, in
 order, with a 1500ms timeout (customizable as `setup({ timeout_ms = 1500 })`).
@@ -91,28 +100,117 @@ ordering information until the pane closes. Existing pane rules and state files
 remain compatible. Disable other automatic IME-switching Neovim plugins to avoid
 two integrations selecting different sources.
 
-## Remote roadmap (not implemented)
+## Remote Neovim / LazyVim
 
-The intended future entry point is `ime-keeper remote workbox --session dev`.
-It will launch the unmodified `herdr --remote` client and manage a separate SSH
-channel for reading the remote Herdr API. There is no `remote` subcommand yet.
+On the Mac, build the plugin and expose the executable in your shell's PATH.
+Run this from the `ime-keeper` directory (for GitHub installs, find `plugin_root`
+in `herdr plugin list --json`):
 
-The planned remote Lua reporter will publish editor state through Herdr metadata
-tokens; the local wrapper will subscribe to pane events and read the current
-pane's mode, initially at 100ms intervals. Input-source selection and memory stay
-on the local Mac. The wrapper will stop switching on disconnect, reconcile a
-snapshot on reconnect, and clean up its auxiliary connection on exit without
-stopping the remote session. The initial remote scope is one interactive client
-per session: Herdr focus events do not identify the originating client.
+```sh
+swift build -c release
+mkdir -p "$HOME/.local/bin"
+ln -s "$PWD/.build/release/ime-keeper" "$HOME/.local/bin/ime-keeper"
+export PATH="$HOME/.local/bin:$PATH"
+```
 
-The current implementation separates portable Lua events, local transport,
-session-scoped policy, and Carbon execution. A reporter passed to
-`setup({ reporter = function(event) ... end })` receives version 1 events with
-`instanceID`, `pid`, increasing `sequence`, `event` (`start`, `mode`, `snapshot`,
-`suspend`, `resume`, `exit`), and `mode` (`edit`, `command`). Return `false, error`
-or throw on failure. Transport adapters supply source/session/pane identity;
-they must verify that identity before applying an event. Remote transport,
-reconnection, multi-host operation, and nested editors are not supported yet.
+Keep the PATH addition in your shell configuration. If the link already exists,
+inspect its target before replacing it. This entry uses the same configuration
+and state directories as the Herdr plugin without requiring a running local
+Herdr server or manually exported plugin variables.
+
+Start from a **Ghostty shell outside local Herdr**:
+
+```sh
+ime-keeper remote ubuntu
+# Or choose a named remote session:
+ime-keeper remote ubuntu --session dev
+```
+
+The wrapper starts the official `herdr --remote` client and an auxiliary SSH
+connection forwarding only the remote public API socket. It discovers that
+socket with `herdr status server --json`; use `--remote-herdr /absolute/path/to/herdr`
+if the auxiliary SSH shell cannot find it. That option controls API discovery;
+the official Herdr client continues using its own remote executable discovery.
+SSH authentication uses your existing config/agent. The helper uses BatchMode;
+if authentication fails, first make sure `ssh ubuntu true` succeeds.
+
+On Ubuntu, add the GitHub LazyVim specification above and run `:Lazy sync`.
+No file copying, Swift build, or Herdr plugin installation is needed there.
+Launch participating editors inside remote Herdr panes with:
+
+```sh
+NVIM_IME=1 nvim
+```
+
+Without `NVIM_IME=1`, the remote integration is disabled. Several panes can each
+run their own Neovim instance. Remove that variable or the Lua setup to disable
+mode reporting; ordinary pane input-source memory continues working.
+
+Local Neovim continues calling Swift directly. Remote Neovim asynchronously
+publishes the same version 1 editor events through `pane.report_metadata`.
+The Mac subscribes to `pane.updated` and pane lifecycle events. There is no
+reverse SSH forward, separate mode socket, system service, or 100ms mode polling.
+Pane focus retains its 100ms stable window; a two-second health reconciliation
+also detects lost editor foreground ownership. Both transports share the editor
+policy: command modes use ABC, editing restores the editing source, and
+exit/suspend restores the pre-editor shell source.
+
+The six `ime_keeper_*` tokens contain version, instance, PID, sequence, event
+and mode.
+Each report atomically patches only these keys under source `ime-keeper:nvim`.
+Reports are serialized, and the Mac ignores old sequences. A one-second heartbeat
+renews a five-second TTL. Herdr can emit updates for heartbeat renewals; those
+do not change the editor mode. An interrupted exit expires automatically. Token
+capacity errors are shown in Lua status and never evict another plugin's tokens.
+
+| Token suffix | Value |
+| --- | --- |
+| `version` | `1` |
+| `instance` | Neovim instance identity |
+| `pid` | Lua core PID |
+| `sequence` | Increasing event sequence |
+| `event` | `start`, `mode`, `snapshot`, `suspend`, `resume`, `exit` |
+| `mode` | `edit` or `command` |
+
+The wrapper pauses input-source control when Ghostty is not frontmost or the
+auxiliary connection fails. On reconnect it resubscribes and reads a fresh
+snapshot. Because Herdr exposes no stable server incarnation identifier, it
+conservatively starts fresh pane/editor memories on each auxiliary reconnect;
+mode reporting resumes from current metadata. Closing the wrapper stops only
+its own client and helper, leaving the remote Herdr server running.
+
+First-release scope: one controlled Ghostty window/tab, one wrapper, one
+interactive client per remote session, and one participating editor per pane.
+Multiple editors in different panes are supported. Nested local Herdr launches
+are rejected. Simultaneously using another local Herdr window is unsupported:
+the wrapper's ownership lock suppresses local input-source hooks until it exits.
+
+### Diagnostics and manual acceptance
+
+```sh
+ime-keeper remote-status
+```
+
+Status includes the wrapper PID, connection state, last error, remote socket,
+pane memories and editor modes. It remains available after exit and reports
+whether the recorded process is alive. Diagnostics are written to the plugin
+state directory instead of overwriting the interactive terminal.
+
+In Neovim:
+
+```vim
+:lua vim.print(require("ime_keeper").status())
+```
+
+Remote transport status distinguishes the last event queued from the sequence
+acknowledged by Herdr; acknowledgement does not mean macOS has already switched.
+
+For desktop acceptance, select Pinyin in Insert, leave with Esc and Ctrl-C,
+open which-key in Normal, then re-enter Insert and immediately type Chinese.
+Repeat across two Neovims and a shell pane, including manual source changes,
+Ctrl-O, Replace, suspend/resume, exit, pane moves, and switching away from Ghostty.
+Verify actual characters/candidates, not only the menu-bar indicator. Network and
+macOS activation latency mean first-character behavior needs this manual check.
 
 ## Development
 
@@ -120,6 +218,9 @@ reconnection, multi-host operation, and nested editors are not supported yet.
 swift test
 swift build -c release
 NVIM_LOG_FILE=/tmp/ime-keeper-nvim-tests.log nvim --headless -u NONE -i NONE -l nvim/tests/integration.lua
+NVIM_LOG_FILE=/tmp/ime-keeper-nvim-tests.log nvim --headless -u NONE -i NONE -l nvim/tests/remote.lua
+# Optional: starts and stops only an isolated temporary Herdr server.
+IME_KEEPER_LIVE_TESTS=1 swift test
 ```
 
 The headless test runner exercises embedded Neovim and a real TUI in a PTY with a

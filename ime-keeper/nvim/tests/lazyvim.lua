@@ -1,7 +1,7 @@
 -- Optional smoke test with an already-installed LazyVim dependency cache.
 -- IME_KEEPER_LAZY_ROOT=/path/to/nvim/lazy nvim --headless -u NONE -i NONE -l nvim/tests/lazyvim.lua
 local cache = assert(vim.env.IME_KEEPER_LAZY_ROOT, "set IME_KEEPER_LAZY_ROOT to an installed LazyVim plugin cache")
-local root = vim.fn.getcwd() .. "/nvim"
+local root = vim.fn.fnamemodify(vim.fn.getcwd(), ":h")
 local temp = vim.fn.tempname()
 vim.fn.mkdir(temp, "p")
 local init = string.format([[
@@ -19,13 +19,12 @@ require('lazy').setup({
   spec = {
     { dir = %q .. '/LazyVim', import = 'lazyvim.plugins', opts = { colorscheme = 'habamax' } },
     {
-      name = 'ime-keeper', dir = %q, lazy = false,
-      config = function()
-        require('ime_keeper').setup({ reporter = function(event)
-          table.insert(_G.ime_events, event)
-          return true
-        end })
-      end,
+      'tsangpo/herdr-plugins', name = 'ime-keeper', dir = %q,
+      main = 'ime_keeper', lazy = false,
+      opts = { reporter = function(event)
+        table.insert(_G.ime_events, event)
+        return true
+      end },
     },
   },
   install = { missing = false },
@@ -48,6 +47,9 @@ local ok, err = pcall(function()
   assert(vim.wait(2000, function() return lua("return _G.ime_events[#_G.ime_events].mode == 'edit'") end, 5))
   vim.rpcrequest(child, "nvim_input", "<Esc>")
   assert(vim.wait(2000, function() return lua("return _G.ime_events[#_G.ime_events].mode == 'command'") end, 5))
+  assert(lua("return type(require('ime_keeper.local_transport').connect) == 'function'"))
+  assert(lua("return type(require('ime_keeper.remote_transport').connect) == 'function'"))
+  assert(lua("return require('ime_keeper') == require('ime_keeper').setup({})"))
   local errors = lua("return _G.ime_errors")
   assert(#errors == 0, table.concat(errors, "\n"))
   vim.rpcnotify(child, "nvim_command", "qa!")

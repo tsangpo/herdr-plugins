@@ -45,18 +45,22 @@ end
 
 --- Set up mode collection. A reporter receives only portable editor events;
 --- transport adapters own pane/session identity and input-source operations.
---- @param opts? {reporter?: function, timeout_ms?: integer, herdr?: string}
+--- @param opts? {reporter?: function, timeout_ms?: integer, herdr?: string, transport?: string}
 function M.setup(opts)
   opts = opts or {}
   if active then
     return M
   end
   local reporter = opts.reporter
+  local transport_status
   if not reporter then
-    if not vim.env.HERDR_SOCKET_PATH or not vim.env.HERDR_PANE_ID or uv.os_uname().sysname ~= "Darwin" then
+    if not vim.env.HERDR_SOCKET_PATH or not vim.env.HERDR_PANE_ID then
       return M
     end
-    local ok, value = pcall(require("ime_keeper.local_transport").connect, opts)
+    local remote = opts.transport == "remote" or uv.os_uname().sysname ~= "Darwin"
+    if remote and vim.env.NVIM_IME ~= "1" then return M end
+    local module = remote and "ime_keeper.remote_transport" or "ime_keeper.local_transport"
+    local ok, value, status = pcall(require(module).connect, opts)
     if not ok then
       vim.schedule(function()
         vim.notify("IME Keeper: " .. tostring(value), vim.log.levels.WARN)
@@ -64,11 +68,13 @@ function M.setup(opts)
       return M
     end
     reporter = value
+    transport_status = status
   end
   local state = {
     reporter = reporter,
     instance = tostring(uv.os_getpid()) .. ":" .. tostring(uv.hrtime()),
     sequence = 0,
+    transport_status = transport_status,
   }
   active = state
   local group = vim.api.nvim_create_augroup("ImeKeeper", { clear = true })
@@ -102,7 +108,10 @@ function M.setup(opts)
 end
 
 function M.status()
-  return active and { sequence = active.sequence, mode = active.mode, error = active.last_error } or { enabled = false }
+  if not active then return { enabled = false } end
+  local value = { sequence = active.sequence, mode = active.mode, error = active.last_error }
+  if active.transport_status then value.transport = active.transport_status() end
+  return value
 end
 
 return M
