@@ -1,8 +1,8 @@
 id = "tsangpo.ime-keeper"
 name = "IME Keeper"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.8.2"
-description = "Remember the macOS input source for each Herdr pane"
+description = "Remember pane input sources and switch with Neovim modes on macOS"
 platforms = ["macos"]
 
 [[build]]
@@ -30,6 +30,12 @@ command = [".build/release/ime-keeper", "event"]
 [[events]]
 on = "workspace.closed"
 command = [".build/release/ime-keeper", "event"]
+
+[[actions]]
+id = "editor-context"
+title = "Neovim Connection Context"
+contexts = ["pane"]
+command = [".build/release/ime-keeper", "editor-context"]
 
 [[actions]]
 id = "status"
