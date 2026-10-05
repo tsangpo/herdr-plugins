@@ -14,12 +14,6 @@ struct PluginDirectories {
     }
 }
 
-/// Held through a local operation, or for the lifetime of a remote wrapper.
-func localControlLease(store: Store) throws -> FileLock? {
-    do { return try FileLock(path: store.directory.appendingPathComponent("control-owner.lock").path, nonblocking: true) }
-    catch let error as KeeperError where error.description == "lock busy" { return nil }
-}
-
 final class RemoteSSH {
     let options: RemoteOptions
     let directory: URL

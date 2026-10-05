@@ -68,6 +68,21 @@ func remoteProcesses(_ value: [String: Any]) -> [ForegroundProcess] {
     }
 }
 
+func remoteNeedsProcesses(event: EditorEvent?, entering: Bool, saved: PaneMemory?, rules: [Rule]) -> Bool {
+    event != nil || (entering && saved == nil && !rules.isEmpty)
+}
+
+extension SessionState {
+    /// A manual choice made while a remote restore is in flight belongs to the
+    /// destination pane. Commit it instead of overwriting it or sampling it as
+    /// the departure pane's preference. Active editors retain their mode policy.
+    mutating func acceptRemoteManualSource(pane: Pane, baseline: String?, current: String) -> Bool {
+        guard let baseline, baseline != current, editors[pane.paneID]?.lifecycle != .active else { return false }
+        panes[pane.paneID] = PaneMemory(inputSourceID: current, workspaceID: pane.workspaceID, tabID: pane.tabID)
+        return true
+    }
+}
+
 extension SessionState {
     /// Metadata is a current-state snapshot. A subscriber may first encounter
     /// an instance on a mode event after startup, so bootstrap active instances.

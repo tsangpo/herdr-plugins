@@ -40,6 +40,7 @@ private func foregroundProcesses(paneID: String) throws -> [ForegroundProcess] {
 }
 
 private func focusOnce(store: Store, departureInputSourceID: String) throws {
+    guard try localInputAllowed(store: store) else { return }
     let pane = try currentPane()
     let currentSource = try currentInputSourceID()
     let configuration = try loadConfiguration()
@@ -48,6 +49,8 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
     let stateLock = try FileLock(path: store.stateLockPath)
     _ = stateLock
     var state = try store.load()
+    let owner = InputOwner(directory: store.directory)
+    if !owner.isCurrent("local:" + store.key) { state.relinquishInputObservation() }
     if state.currentPane?.paneID != pane.paneID {
         state.rememberLeavingPane(currentInputSourceID: departureInputSourceID)
     }
@@ -73,7 +76,7 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
             state.editors[pane.paneID]?.appliedMode = nil
         }
     }
-    guard try currentPane().paneID == pane.paneID else { return }
+    guard try currentPane().paneID == pane.paneID, try localInputAllowed(store: store) else { return }
     var enteredSource = currentSource
     if let desired {
         if desired != currentSource {
@@ -93,6 +96,7 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
             )
         }
     }
+    try owner.claim("local:" + store.key)
     state.currentPane = pane
     state.entryInputSourceID = enteredSource
     try store.save(state)
@@ -100,8 +104,7 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
 
 private func handleFocus() throws {
     let store = try Store()
-    guard let ownership = try localControlLease(store: store) else { return }
-    defer { withExtendedLifetime(ownership) {} }
+    guard try localInputAllowed(store: store) else { return }
     try store.markDirty(inputSourceID: currentInputSourceID())
     let focusLock: FileLock
     do { focusLock = try FileLock(path: store.focusLockPath, nonblocking: true) }
@@ -231,13 +234,14 @@ private func handleEditorEvent() throws {
     try event.validate()
     _ = try loadConfiguration()
     let store = try Store()
-    guard let ownership = try localControlLease(store: store) else { return }
-    defer { withExtendedLifetime(ownership) {} }
     let switchLock = try FileLock(path: store.switchLockPath)
     let stateLock = try FileLock(path: store.stateLockPath)
     defer { withExtendedLifetime((switchLock, stateLock)) {} }
     var state = try store.load()
     let session = EditorSession(sourceID: "local", sessionID: store.key)
+    let mayControl = try localInputAllowed(store: store)
+    let owner = InputOwner(directory: store.directory)
+    if !mayControl || !owner.isCurrent("local:" + store.key) { state.relinquishInputObservation() }
     // A moved pane keeps its editor instance, even though Neovim's inherited
     // HERDR_PANE_ID still contains the old ID.
     let remembered = state.editors.values.first { $0.instanceID == event.instanceID && $0.pid == event.pid }
@@ -259,9 +263,10 @@ private func handleEditorEvent() throws {
         let foregroundPIDs = processes.compactMap(\.pid).map(String.init).joined(separator: ", ")
         throw KeeperError.message("editor PID \(event.pid) is not the pane's foreground Neovim (foreground PIDs: \(foregroundPIDs))")
     }
-    let focused = try currentPane().paneID == pane.paneID
+    let focused = try mayControl && currentPane().paneID == pane.paneID
         && (state.currentPane == nil || state.currentPane?.paneID == pane.paneID)
     let observed = focused ? try currentInputSourceID() : nil
+    let previousState = state
     let previousEditor = state.editors[pane.paneID]
     let target = try state.receiveEditor(
         event, context: EditorContext(session: session, pane: pane),
@@ -273,9 +278,18 @@ private func handleEditorEvent() throws {
     }
     var switchError: Error?
     if let target, try currentPane().paneID == pane.paneID {
+        guard try localInputAllowed(store: store) else {
+            state = previousState
+            state.relinquishInputObservation()
+            _ = try state.receiveEditor(event, context: EditorContext(session: session, pane: pane),
+                                        expectedSession: session, observedInputSourceID: nil)
+            try store.save(state)
+            return
+        }
         do {
             if target != observed { try selectInputSource(target, settle: false) }
             state.editorSwitchSucceeded(paneID: pane.paneID)
+            try owner.claim("local:" + store.key)
             state.currentPane = pane
             state.entryInputSourceID = target
         } catch { switchError = error }

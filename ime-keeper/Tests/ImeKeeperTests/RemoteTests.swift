@@ -99,16 +99,156 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     #expect(inbox.view().failure == "events_lost")
 }
 
-@Test func controllerOwnershipIsExclusiveAndReleased() throws {
+@Test func remoteRegistrationDoesNotBlockTheLocalTerminal() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try Store(directory: directory, key: "test")
-    var lease = try localControlLease(store: store)
-    #expect(lease != nil)
-    #expect(try localControlLease(store: store) == nil)
-    withExtendedLifetime(lease) {}
-    lease = nil
-    #expect(try localControlLease(store: store) != nil)
+    var registration: RemoteRegistration? = try RemoteRegistration(directory: directory, surfaceID: "remote-tab")
+    #expect(try localInputAllowed(store: store, query: { "local-tab" }))
+    #expect(try !localInputAllowed(store: store, query: { "remote-tab" }))
+    #expect(try !localInputAllowed(store: store, query: { nil }))
+    #expect(throws: Error.self) { try RemoteRegistration(directory: directory, surfaceID: "other-tab") }
+    withExtendedLifetime(registration) {}
+    registration = nil
+    #expect(try RemoteRegistration.active(in: directory) == nil)
+    #expect(try localInputAllowed(store: store, query: { nil }))
+}
+
+@Test func focusArrivalInvalidatesQueuedSwitchBeforeDepartureSampling() {
+    let inbox = RemoteInbox()
+    let queuedSwitch = inbox.view()
+    // The reader receives focus while the main thread is still busy checking
+    // Ghostty for the old switch. Invalidation must not wait for that thread.
+    let sample = inbox.beginFocusSample()
+    #expect(inbox.view().revision != queuedSwitch.revision)
+    #expect(inbox.view().focusSamplePending)
+    // Metadata arriving during the sample must not allow reconciliation yet.
+    inbox.invalidate()
+    #expect(inbox.view().focusSamplePending)
+    inbox.finishFocusSample(sample, source: "Pinyin")
+    #expect(!inbox.view().focusSamplePending)
+    #expect(inbox.view().departure == "Pinyin")
+    inbox.consumed(queuedSwitch.revision)
+    #expect(inbox.view().departure == "Pinyin")
+}
+
+@Test func ordinaryRemotePaneRoundTripPreservesDifferentInputSources() throws {
+    let a = Pane(paneID: "a", workspaceID: "w", tabID: "t")
+    let b = Pane(paneID: "b", workspaceID: "w", tabID: "t")
+    let session = EditorSession(sourceID: "ssh:test", sessionID: "s")
+    var state = SessionState(currentPane: a, entryInputSourceID: "ABC", panes: [
+        "a": PaneMemory(inputSourceID: "ABC", workspaceID: "w", tabID: "t"),
+        "b": PaneMemory(inputSourceID: "ABC", workspaceID: "w", tabID: "t"),
+    ])
+    let inbox = RemoteInbox()
+    let first = inbox.beginFocusSample()
+    inbox.finishFocusSample(first, source: "Pinyin") // Manual change in A.
+    // Another focus event in the same burst must retain A's departure.
+    let second = inbox.beginFocusSample()
+    inbox.finishFocusSample(second, source: "ABC")
+    state.rememberLeavingPane(currentInputSourceID: try #require(inbox.view().departure))
+    let targetB = try state.remoteFocusTarget(event: nil, verified: false, pane: b,
+        session: session, entering: true, observed: "Pinyin",
+        ordinaryTarget: desiredInputSource(saved: state.panes[b.paneID], ruleInputSourceID: nil))
+    #expect(targetB == "ABC")
+    state.currentPane = b
+    state.entryInputSourceID = targetB
+    state.rememberLeavingPane(currentInputSourceID: "ABC")
+    let targetA = try state.remoteFocusTarget(event: nil, verified: false, pane: a,
+        session: session, entering: true, observed: "ABC",
+        ordinaryTarget: desiredInputSource(saved: state.panes[a.paneID], ruleInputSourceID: nil))
+    #expect(targetA == "Pinyin")
+    #expect(state.panes[b.paneID]?.inputSourceID == "ABC")
+}
+
+@Test func manualChangeDuringRemoteRestoreBelongsToDestinationPane() {
+    let a = Pane(paneID: "a", workspaceID: "w", tabID: "t")
+    let b = Pane(paneID: "b", workspaceID: "w", tabID: "t")
+    var state = SessionState(currentPane: a, entryInputSourceID: "ABC", panes: [
+        "a": PaneMemory(inputSourceID: "ABC", workspaceID: "w", tabID: "t"),
+        "b": PaneMemory(inputSourceID: "ABC", workspaceID: "w", tabID: "t"),
+    ])
+    // Focus departed A with ABC. While the network/focus checks for B wait,
+    // the user chooses Pinyin. The pending ABC restore must be skipped.
+    state.rememberLeavingPane(currentInputSourceID: "ABC")
+    let changed = state.acceptRemoteManualSource(pane: b, baseline: "ABC", current: "Pinyin")
+    #expect(changed)
+    #expect(state.panes[a.paneID]?.inputSourceID == "ABC")
+    #expect(state.panes[b.paneID]?.inputSourceID == "Pinyin")
+    #expect(desiredInputSource(saved: state.panes[b.paneID], ruleInputSourceID: "ABC") == "Pinyin")
+    let unchanged = state.acceptRemoteManualSource(pane: b, baseline: "Pinyin", current: "Pinyin")
+    let unobserved = state.acceptRemoteManualSource(pane: b, baseline: nil, current: "ABC")
+    #expect(!unchanged)
+    #expect(!unobserved)
+    #expect(state.panes[b.paneID]?.inputSourceID == "Pinyin")
+}
+
+@Test func rememberedOrdinaryPaneSkipsProcessRoundTripButEditorsStillValidate() throws {
+    let saved = PaneMemory(inputSourceID: "Pinyin", workspaceID: "w", tabID: "t")
+    let rules = [Rule(command: "codex", inputSourceID: "ABC")]
+    #expect(!remoteNeedsProcesses(event: nil, entering: true, saved: saved, rules: rules))
+    #expect(!remoteNeedsProcesses(event: nil, entering: true, saved: nil, rules: []))
+    #expect(!remoteNeedsProcesses(event: nil, entering: false, saved: nil, rules: rules))
+    #expect(remoteNeedsProcesses(event: nil, entering: true, saved: nil, rules: rules))
+    let event = try #require(try remoteEditorEvent(tokens: tokens()))
+    #expect(remoteNeedsProcesses(event: event, entering: true, saved: saved, rules: rules))
+}
+
+@Test func terminalFocusRevalidationRejectsDelayedEventsFromOtherTabs() {
+    var surface: String? = "remote-tab"
+    var fail = false
+    let focus = RemoteTerminalFocus(surfaceID: "remote-tab") {
+        if fail { throw KeeperError.message("automation denied") }
+        return surface
+    }
+    #expect(focus.isSelected(fresh: true))
+    surface = "local-tab"
+    #expect(!focus.isSelected(fresh: true))
+    surface = "remote-tab"
+    #expect(focus.isSelected(fresh: true))
+    fail = true
+    #expect(!focus.isSelected(fresh: true))
+    #expect(focus.error != nil)
+    fail = false
+    surface = nil
+    #expect(!focus.isSelected(fresh: true))
+}
+
+@Test func staleRegistrationDoesNotSuppressLocalHooks() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try Store(directory: directory, key: "test")
+    let stale = RemoteRegistration.Record(pid: 123, surfaceID: "remote-tab", token: UUID())
+    try JSONEncoder().encode(stale).write(to: directory.appendingPathComponent("remote-controller.json"))
+    #expect(try RemoteRegistration.active(in: directory) == nil)
+    #expect(try localInputAllowed(store: store, query: { "remote-tab" }))
+}
+
+@Test func legacyWrapperRequiresRestartRatherThanRacingLocalHooks() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try Store(directory: directory, key: "test")
+    let legacy = try FileLock(path: directory.appendingPathComponent("control-owner.lock").path)
+    defer { withExtendedLifetime(legacy) {} }
+    let error = #expect(throws: KeeperError.self) {
+        try localInputAllowed(store: store, query: { "local-tab" })
+    }
+    #expect(error?.description == "restart the older ime-keeper remote client to enable terminal-scoped ownership")
+}
+
+@Test func ownershipHandoffCannotSampleAnotherTerminalsInput() throws {
+    let pane = Pane(paneID: "p", workspaceID: "w", tabID: "t")
+    let session = EditorSession(sourceID: "local", sessionID: "s")
+    var state = SessionState.empty
+    let event = try #require(try remoteEditorEvent(tokens: tokens(mode: "edit")))
+    _ = try state.receiveRemoteEditor(event, pane: pane, session: session, observed: "local-pinyin")
+    state.editorSwitchSucceeded(paneID: pane.paneID)
+    state.currentPane = pane
+    state.relinquishInputObservation()
+    let command = try #require(try remoteEditorEvent(tokens: tokens(sequence: 2)))
+    _ = try state.receiveRemoteEditor(command, pane: pane, session: session, observed: "remote-ABC")
+    #expect(state.editors[pane.paneID]?.editingInputSourceID == "local-pinyin")
+    #expect(state.currentPane == nil)
 }
 
 @Test func inactiveApplicationCannotSeedEditorMemoryWithABC() throws {

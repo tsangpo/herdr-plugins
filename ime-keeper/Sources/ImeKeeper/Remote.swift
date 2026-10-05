@@ -10,6 +10,8 @@ final class RemoteInbox {
     private var failure: String?
     private var focusAt = Date.distantPast
     private var departure: String?
+    private var focusSample: UInt64 = 0
+    private var focusSamplePending = false
 
     struct View {
         let revision: UInt64
@@ -17,10 +19,29 @@ final class RemoteInbox {
         let failure: String?
         let focusAt: Date
         let departure: String?
+        let focusSamplePending: Bool
     }
     func view() -> View {
         lock.lock(); defer { lock.unlock() }
-        return View(revision: revision, stopped: stopped, failure: failure, focusAt: focusAt, departure: departure)
+        return View(revision: revision, stopped: stopped, failure: failure, focusAt: focusAt,
+                    departure: departure, focusSamplePending: focusSamplePending)
+    }
+    // Invalidate BEFORE dispatching to the main thread. Otherwise an already
+    // queued switch can run first and become the supposed departure source.
+    func beginFocusSample() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        revision &+= 1
+        focusSample &+= 1
+        focusSamplePending = true
+        focusAt = Date()
+        return focusSample
+    }
+    func finishFocusSample(_ sample: UInt64, source: String?) {
+        lock.lock(); defer { lock.unlock() }
+        guard sample == focusSample, focusSamplePending else { return }
+        if departure == nil { departure = source }
+        focusSamplePending = false
+        revision &+= 1
     }
     func invalidate(focus: Bool = false, source: String? = nil) {
         lock.lock(); defer { lock.unlock() }
@@ -44,13 +65,10 @@ private func onMain<T>(_ operation: () throws -> T) rethrows -> T {
     try DispatchQueue.main.sync(execute: operation)
 }
 
-private func ghosttyIsFrontmost() -> Bool {
-    NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.mitchellh.ghostty"
-}
-
 final class RemoteBridge {
     let options: RemoteOptions
     let directories: PluginDirectories
+    let terminalFocus: RemoteTerminalFocus
     let stopSignal = RemoteInbox()
     private var state = SessionState.empty
     private var terminalPanes: [String: Pane] = [:]
@@ -59,9 +77,10 @@ final class RemoteBridge {
     private var lastError: String?
     private var identityCache: [Int32: (Date, LocalProcessIdentity)] = [:]
 
-    init(options: RemoteOptions, directories: PluginDirectories) {
+    init(options: RemoteOptions, directories: PluginDirectories, terminalFocus: RemoteTerminalFocus) {
         self.options = options
         self.directories = directories
+        self.terminalFocus = terminalFocus
     }
 
     private func configuration() throws -> Configuration {
@@ -73,8 +92,10 @@ final class RemoteBridge {
     private func status(_ connection: String) {
         var value: [String: Any] = ["target": options.target, "session": options.session ?? "default",
             "connection": connection, "pid": getpid(), "socket": remoteSocket,
+            "ghosttyTerminalID": terminalFocus.surfaceID,
             "state": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(state))) ?? [:]]
         if let lastError { value["error"] = lastError }
+        if let focusError = onMain({ terminalFocus.error }) { value["focusError"] = focusError }
         let path = directories.state.appendingPathComponent("remote-status.json")
         do { try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: path, options: .atomic) }
         catch { log("cannot save remote status: \(error)") }
@@ -111,10 +132,16 @@ final class RemoteBridge {
                                 throw KeeperError.message("Herdr events lost; resubscribing")
                             }
                             let focus = kind == "pane_focused" || kind == "pane.focused"
-                            let source: String? = focus ? onMain {
-                                ghosttyIsFrontmost() ? try? currentInputSourceID() : nil
-                            } : nil
-                            inbox.invalidate(focus: focus, source: source)
+                            if focus {
+                                let sample = inbox.beginFocusSample()
+                                let source: String? = onMain {
+                                    let source = try? currentInputSourceID()
+                                    return self.terminalFocus.isSelected(fresh: true) ? source : nil
+                                }
+                                inbox.finishFocusSample(sample, source: source)
+                            } else {
+                                inbox.invalidate()
+                            }
                         }
                     } catch { inbox.fail(String(describing: error)) }
                 }
@@ -128,13 +155,12 @@ final class RemoteBridge {
                 var healthAt = Date.distantPast
                 retry = 0.5
                 while !stopSignal.view().stopped {
-                    let front = onMain { ghosttyIsFrontmost() }
+                    let front = onMain { terminalFocus.isSelected() }
                     if front != wasFront {
                         if !front {
                             // Never interpret another application's source as an
                             // editor choice when returning to Ghostty.
-                            for key in state.editors.keys { state.editors[key]?.appliedMode = nil }
-                            state.currentPane = nil
+                            state.relinquishInputObservation()
                         }
                         inbox.invalidate()
                     }
@@ -142,7 +168,7 @@ final class RemoteBridge {
                     wasFront = front
                     let view = inbox.view()
                     if let failure = view.failure { throw KeeperError.message(failure) }
-                    if Date().timeIntervalSince(view.focusAt) < 0.1 {
+                    if view.focusSamplePending || Date().timeIntervalSince(view.focusAt) < 0.1 {
                         Thread.sleep(forTimeInterval: 0.01)
                         continue
                     }
@@ -151,7 +177,7 @@ final class RemoteBridge {
                             handled = view.revision
                             inbox.consumed(view.revision)
                             healthAt = Date().addingTimeInterval(2)
-                            status(front ? "connected" : "paused: Ghostty is not frontmost")
+                            status(front ? "connected" : "paused: remote Ghostty terminal is not focused")
                         }
                     }
                     Thread.sleep(forTimeInterval: 0.02)
@@ -178,6 +204,8 @@ final class RemoteBridge {
         }
         let focusedID = snapshot["focused_pane_id"] as? String
         var candidate = state
+        let ownership = InputOwner(directory: store.directory)
+        if !ownership.isCurrent(store.key) { candidate.relinquishInputObservation() }
         var terminals: [String: Pane] = [:]
         for row in rows {
             let pane = try remotePane(row)
@@ -191,7 +219,7 @@ final class RemoteBridge {
         let focusedRow = rows.first { $0["pane_id"] as? String == focusedID }
         let pane = try focusedRow.map(remotePane)
         let entering = candidate.currentPane?.paneID != focusedID
-        let observed: String? = try onMain { front && ghosttyIsFrontmost() ? try currentInputSourceID() : nil }
+        let observed: String? = try onMain { front && terminalFocus.isSelected(fresh: true) ? try currentInputSourceID() : nil }
         if entering, let source = view.departure ?? observed {
             // A focus event can still arrive after another app became active.
             if front { candidate.rememberLeavingPane(currentInputSourceID: source) }
@@ -211,15 +239,19 @@ final class RemoteBridge {
             try store.save(state)
             return true
         }
-        let processResult = try api.request("pane.process_info", ["pane_id": pane.paneID])
-        guard let info = processResult["process_info"] as? [String: Any] else {
-            throw KeeperError.message("Herdr process response is missing process_info")
-        }
-        let processes = remoteProcesses(info)
         let config = try configuration()
+        let event = try remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:])
+        var processes: [ForegroundProcess] = []
+        if remoteNeedsProcesses(event: event, entering: entering,
+                                saved: candidate.panes[pane.paneID], rules: config.rules) {
+            let processResult = try api.request("pane.process_info", ["pane_id": pane.paneID])
+            guard let info = processResult["process_info"] as? [String: Any] else {
+                throw KeeperError.message("Herdr process response is missing process_info")
+            }
+            processes = remoteProcesses(info)
+        }
         var desired = entering ? desiredInputSource(saved: candidate.panes[pane.paneID],
             ruleInputSourceID: matchingInputSource(rules: config.rules, processes: processes)) : nil
-        let event = try remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:])
         var valid = false
         if let event {
             valid = editorIsForeground(pid: event.pid, processes: processes) { pid in
@@ -244,13 +276,20 @@ final class RemoteBridge {
               inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
         let applied = try onMain { () -> Bool in
             guard !self.stopSignal.view().stopped, inbox.view().revision == view.revision else { return false }
-            guard front && ghosttyIsFrontmost() else { return true }
+            guard front else { return true }
             let lock = try FileLock(path: store.switchLockPath)
             defer { withExtendedLifetime(lock) {} }
-            var entered = observed
-            if let desired {
+            guard self.terminalFocus.isSelected(fresh: true) else { return false }
+            // The lock and AppleScript query can both wait. A focus event may
+            // have invalidated this candidate during either operation.
+            guard inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
+            let latest = try currentInputSourceID()
+            let manuallyChanged = candidate.acceptRemoteManualSource(pane: pane,
+                baseline: view.departure ?? observed, current: latest)
+            var entered = latest
+            if let desired, !manuallyChanged {
                 do {
-                    if try currentInputSourceID() != desired { try selectInputSource(desired, settle: false) }
+                    if latest != desired { try selectInputSource(desired, settle: false) }
                     candidate.editorSwitchSucceeded(paneID: pane.paneID)
                     entered = desired
                     self.lastError = nil
@@ -263,6 +302,7 @@ final class RemoteBridge {
                     self.lastError = String(describing: error)
                 }
             }
+            try ownership.claim(store.key)
             candidate.currentPane = pane
             if entering { candidate.entryInputSourceID = entered }
             return true
@@ -291,10 +331,12 @@ func runRemote(arguments: [String]) throws {
     guard isatty(STDIN_FILENO) == 1 else { throw KeeperError.message("remote requires an interactive terminal") }
     let directories = PluginDirectories(environment: environment)
     let store = try Store(directory: directories.state, key: "remote-owner")
-    guard let ownership = try localControlLease(store: store) else {
-        throw KeeperError.message("another IME Keeper controller is active")
+    _ = try localInputAllowed(store: store)
+    guard let surfaceID = try focusedGhosttySurface() else {
+        throw KeeperError.message("start remote from the selected Ghostty terminal; its surface ID could not be determined")
     }
-    defer { withExtendedLifetime(ownership) {} }
+    let registration = try RemoteRegistration(directory: directories.state, surfaceID: surfaceID)
+    defer { withExtendedLifetime(registration) {} }
     if FileManager.default.fileExists(atPath: directories.config.appendingPathComponent("config.json").path) {
         _ = try Configuration.decode(Data(contentsOf: directories.config.appendingPathComponent("config.json")))
     }
@@ -307,7 +349,7 @@ func runRemote(arguments: [String]) throws {
     var clientEnv = environment
     clientEnv.removeValue(forKey: "HERDR_SOCKET_PATH")
     client.environment = clientEnv
-    let bridge = RemoteBridge(options: options, directories: directories)
+    let bridge = RemoteBridge(options: options, directories: directories, terminalFocus: RemoteTerminalFocus(surfaceID: surfaceID))
     var terminal = termios()
     let hasTerminal = tcgetattr(STDIN_FILENO, &terminal) == 0
     let group = tcgetpgrp(STDIN_FILENO)

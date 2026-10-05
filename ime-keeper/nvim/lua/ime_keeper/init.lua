@@ -58,7 +58,7 @@ function M.setup(opts)
       return M
     end
     local remote = opts.transport == "remote" or uv.os_uname().sysname ~= "Darwin"
-    if remote and vim.env.NVIM_IME ~= "1" then return M end
+    if remote and vim.env.NVIM_IME == "0" then return M end
     local module = remote and "ime_keeper.remote_transport" or "ime_keeper.local_transport"
     local ok, value, status = pcall(require(module).connect, opts)
     if not ok then

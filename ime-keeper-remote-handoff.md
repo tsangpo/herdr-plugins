@@ -14,8 +14,8 @@
 - 入口：`ime-keeper remote <ssh-target> [--session <name>] [--remote-herdr <path>]`。
 - 包装进程启动官方 `herdr --remote`，辅助 SSH 转发远端公开 API socket；没有反向转发、独立模式 socket、远端 Swift 或系统常驻服务。
 - 本地启动方式不变。Herdr 0.9.3 的公开 API 可以订阅 `pane.updated`，但插件 hook 白名单排除了它，所以不能仅添加 manifest hook 统一本地传输。
-- 远端通过 LazyVim 的 `tsangpo/herdr-plugins` GitHub 配置安装相同 Lua runtime，用 `:Lazy sync` 安装、`:Lazy update ime-keeper` 更新，无需复制目录。通过 `NVIM_IME=1 nvim` 启用；无需在 Ubuntu 安装 macOS Herdr 插件。
-- 首版从 Ghostty 普通 shell 启动，拒绝本地 Herdr pane 内嵌套启动。一个受控窗口/tab、一个包装连接、同一远端会话一个交互客户端。支持多个 pane 各自运行一个 Neovim。
+- 远端通过 LazyVim 的 `tsangpo/herdr-plugins` GitHub 配置安装相同 Lua runtime，用 `:Lazy sync` 安装、`:Lazy update ime-keeper` 更新，无需复制目录。在远端 Herdr pane 中直接运行 `nvim` 自动启用，`NVIM_IME=0 nvim` 可临时关闭；无需在 Ubuntu 安装 macOS Herdr 插件。
+- 首版从 Ghostty 普通 shell 启动，拒绝本地 Herdr pane 内嵌套启动。一个受控远程终端、一个包装连接（可与其他标签页的本地 Herdr 共存）、同一远端会话一个交互客户端。支持多个 pane 各自运行一个 Neovim。
 
 ## 协议与策略
 
@@ -27,12 +27,12 @@ Normal、Visual、命令行等使用 ABC；Insert/Replace 恢复编辑输入法�
 
 远端前台校验不能使用 Mac PID。Neovim 可能把 TUI 与 Lua core 分成两个进程，需接受直接前台 PID，或远端系统查询验证的直接父子关系。
 
-焦点保留 100ms 稳定窗口，模式无额外去抖。先订阅再取快照，应用前重新查询当前 pane 和 tokens，并检查事件代次。两秒健康检查用于发现失去前台控制权等状态变化。Ghostty 失焦期间不采样或切换。
+焦点保留 100ms 稳定窗口，模式无额外去抖。先订阅再取快照，应用前重新查询当前 pane 和 tokens，并检查事件代次。两秒健康检查用于发现失去前台控制权等状态变化。通过 Ghostty AppleScript 查询选中终端 ID；远程终端所在标签页或 split 未选中、Ghostty 失焦、查询失败期间不采样或切换，实际切换前再次确认终端。
 
 ## 生命周期与状态
 
 - 配置和状态目录兼容原有插件环境与 Herdr 的 XDG 默认路径；Mac shell 入口不依赖本地 Herdr 正在运行。
-- 包装进程持有控制权锁，本地输入法 handler 非阻塞获取同一把锁。锁及 socket 描述符设置 close-on-exec，避免子进程继承锁导致退出后无法恢复本地控制。
+- 包装进程只长期持有防重复启动的 remote-instance 锁；全局输入法锁只在实际操作时持有。本地 handler 根据选中终端避让远程，进程退出后的残留注册文件不阻塞本地。控制方交接时清除 applied policy 观察标记，保留已记录的输入法偏好。锁及 socket 描述符设置 close-on-exec。升级后须重启旧的 0.3.0 包装进程一次，以释放旧生命周期锁。
 - pane 通过 terminal identity 迁移，关闭清理。远程状态命名空间包含 SSH 目标、会话和远端 socket。
 - 辅助连接故障暂停控制并退避重连，不终止官方客户端。当前 API 缺少稳定的服务实例标识，所以每次辅助重连都保守地清空旧记忆，再从当前 metadata 建立状态。
 - 损坏的配置或状态报错，不覆盖。诊断写入 `remote-status.json`，避免污染交互终端。`ime-keeper remote-status` 可在退出后读取。

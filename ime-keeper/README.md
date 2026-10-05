@@ -139,12 +139,14 @@ No file copying, Swift build, or Herdr plugin installation is needed there.
 Launch participating editors inside remote Herdr panes with:
 
 ```sh
-NVIM_IME=1 nvim
+nvim
 ```
 
-Without `NVIM_IME=1`, the remote integration is disabled. Several panes can each
-run their own Neovim instance. Remove that variable or the Lua setup to disable
-mode reporting; ordinary pane input-source memory continues working.
+Reporting starts automatically when the Lua plugin is loaded inside a remote
+Herdr pane. Several panes can each run their own Neovim instance. Use
+`NVIM_IME=0 nvim` or remove the Lua setup to disable remote mode reporting;
+ordinary pane input-source memory continues working. Outside Herdr, setup
+remains inactive. Existing `NVIM_IME=1` launch commands still work.
 
 Local Neovim continues calling Swift directly. Remote Neovim asynchronously
 publishes the same version 1 editor events through `pane.report_metadata`.
@@ -172,18 +174,24 @@ capacity errors are shown in Lua status and never evict another plugin's tokens.
 | `event` | `start`, `mode`, `snapshot`, `suspend`, `resume`, `exit` |
 | `mode` | `edit` or `command` |
 
-The wrapper pauses input-source control when Ghostty is not frontmost or the
-auxiliary connection fails. On reconnect it resubscribes and reads a fresh
+The wrapper records the selected Ghostty terminal when it starts and pauses
+input-source control when another tab or split is selected, Ghostty is not
+frontmost, or the auxiliary connection fails. Terminal detection uses Ghostty's
+AppleScript interface (tested with Ghostty 1.3.1); allow macOS Automation access
+if prompted. If terminal detection fails, input-source control pauses. On reconnect it resubscribes and reads a fresh
 snapshot. Because Herdr exposes no stable server incarnation identifier, it
 conservatively starts fresh pane/editor memories on each auxiliary reconnect;
 mode reporting resumes from current metadata. Closing the wrapper stops only
 its own client and helper, leaving the remote Herdr server running.
 
-First-release scope: one controlled Ghostty window/tab, one wrapper, one
+Scope: one remote Ghostty terminal, one wrapper, one
 interactive client per remote session, and one participating editor per pane.
 Multiple editors in different panes are supported. Nested local Herdr launches
-are rejected. Simultaneously using another local Herdr window is unsupported:
-the wrapper's ownership lock suppresses local input-source hooks until it exits.
+are rejected. Local Herdr can remain open in other Ghostty tabs or windows:
+local hooks run when the remote terminal is not selected, and the remote
+wrapper controls input only while its terminal is selected. The global switch
+lock is held only during input-source operations. After upgrading from 0.3.0,
+restart the existing wrapper once to release its old lifetime control lock.
 
 ### Diagnostics and manual acceptance
 
@@ -191,7 +199,8 @@ the wrapper's ownership lock suppresses local input-source hooks until it exits.
 ime-keeper remote-status
 ```
 
-Status includes the wrapper PID, connection state, last error, remote socket,
+Status includes the wrapper PID, registered Ghostty terminal ID, connection
+state, terminal detection errors, last error, remote socket,
 pane memories and editor modes. It remains available after exit and reports
 whether the recorded process is alive. Diagnostics are written to the plugin
 state directory instead of overwriting the interactive terminal.
