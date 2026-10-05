@@ -102,6 +102,29 @@ two integrations selecting different sources.
 
 ## Remote Neovim / LazyVim
 
+Fish users can use the bundled [ime-remote function](fish/ime-remote.fish)
+instead of adding the executable to PATH. After installing or linking the
+plugin, run this once in fish (requires `jq`):
+
+```fish
+set -l ime_root (herdr plugin list --json | jq -er '.result.plugins[] | select(.plugin_id == "tsangpo.ime-keeper") | .plugin_root')
+source "$ime_root/fish/ime-remote.fish"
+funcsave ime-remote
+```
+
+Then, from a **Ghostty shell outside local Herdr**:
+
+```fish
+ime-remote ubuntu
+ime-remote ubuntu --session dev
+```
+
+The function looks up the installed plugin root on every invocation, so it
+works with both GitHub installs and local links. Local links still require
+`swift build -c release` in the plugin directory before use.
+
+For other shells, or to invoke the executable directly:
+
 On the Mac, build the plugin and expose the executable in your shell's PATH.
 Run this from the `ime-keeper` directory (for GitHub installs, find `plugin_root`
 in `herdr plugin list --json`):
