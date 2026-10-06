@@ -35,6 +35,10 @@
 - Remote reporting starts automatically when the Lua plugin is loaded inside a remote Herdr pane; `NVIM_IME=0` opts out. The remote host needs only the Lua runtime, not the macOS plugin or Swift. The Mac wrapper forwards the remote public API socket over auxiliary SSH; do not introduce reverse forwarding or a separate editor-event socket.
 - Report one atomic token patch with a fixed source and no Herdr `seq`. Ordering belongs to the editor instance/sequence fields. Unique sequenced sources exhaust Herdr's 32-source lifetime limit; individual token values are limited to 80 characters.
 - Renew the five-second TTL every second without incrementing the editor sequence. TTL renewal itself can emit `pane.updated` in Herdr 0.9.3: do not assume unchanged values suppress the event. Deduplicate mode application on the Mac.
+- Deduplicate subscription `pane.updated` using IME tokens plus pane/workspace/tab/terminal identity and focus. Share that projection with final `pane.current` verification; unrelated tokens must not invalidate a candidate. The reader owns received-state deduplication, separately from applied policy. Structural or malformed events invalidate conservatively; reconnect starts with an empty cache.
+- Wake the remote worker with a condition and revision predicate under the same lock. Coalesce notifications, preserve pending departure sampling and the 100ms focus window, and wait until the next focus/terminal/health deadline. Do not accumulate semaphore permits or restore 20ms polling.
+- Schedule two-second health work independently of event reconciliations. Only real health work advances its deadline; cache hits and mode events must not postpone it. Keep `pane.process_info` and final `pane.current` checks. Kernel identity cache hits must not extend the one-second lookup lifetime; clear on focus entry, terminal ownership changes, lifecycle/identity changes, moves and reconnect.
+- Save unchanged session/status data only once; update the last-written cache only after a successful write. Business status changes flush immediately, metrics alone at most every two seconds. Measure local event receipt through successful mode application separately from reconciliation duration and actual Chinese-input latency.
 - On TTL expiry, stop editor control but retain dormant instance identity and editing memory for a verified resume. Keep this distinct from auxiliary reconnection, which clears memories when server continuity cannot be established. Namespace remote state by SSH target, session, and remote socket.
 - Keep Lua asynchronous and bounded. A Herdr acknowledgement is distinct from successful macOS application. Reconnect sends the latest state; stale pending modes are not replayed. Resolve pane moves through terminal identity.
 - Validate foreground PIDs on the remote host, including the direct Neovim TUI/core parent relationship. Never pass remote PIDs to macOS process inspection. Metadata is current state, so a new subscriber can bootstrap from a mode report rather than waiting for a start event.
@@ -56,11 +60,15 @@ NVIM_LOG_FILE=/tmp/ime-keeper-nvim-tests.log nvim --headless -u NONE -i NONE -l 
 NVIM_LOG_FILE=/tmp/ime-keeper-nvim-tests.log nvim --headless -u NONE -i NONE -l nvim/tests/remote.lua
 # Opt-in real API test; only its temporary named server is stopped.
 IME_KEEPER_LIVE_TESTS=1 swift test
+# Optional isolated SSH test (Herdr and Neovim must be installed on the target).
+IME_KEEPER_REMOTE_TEST_HOST=ubuntu swift test --filter remoteRealTUIsAndIdleEventFiltering
 ```
 
 Keep tests for rule order and basename matching, saved-memory priority, manual overrides, no-rule behavior, close/move cleanup, malformed config, and socket caller/focus separation, shared query deadlines, and config/state directory consistency.
 
 For editor changes, exercise both embedded/headless Neovim and a real TUI in a PTY. Headless tests alone missed the TUI/core PID split. Keep positive and negative foreground-identity tests, plus mode/focus races and failed-switch memory tests. The Lua integration suite covers both startup shapes; when a LazyVim dependency cache is available, also run `nvim/tests/lazyvim.lua` with `IME_KEEPER_LAZY_ROOT` set to that cache.
+
+Herdr control keys use `ctrl+z` spelling. Send Neovim Ex commands as individual keys followed by `enter`; reserve `pane run` for shell commands. A suspended Lua loop may not flush an asynchronous report, so verify foreground loss and TTL release as well as suspend/resume metadata.
 
 Continuously drain the PTY master during automated TUI tests; otherwise output backpressure can prevent the child from exiting. Test remote mode reporting with two real Neovim TUIs, background panes, helper disconnect/reconnect, and exit/TTL cleanup in an isolated remote session. A substitute-client wrapper test validates transport and lifecycle, not the official client's desktop input behavior. Verify actual Chinese characters and candidates immediately after entering Insert; menu-bar indicators and headless tests are insufficient. Report query-path benchmarks separately from Swift startup, TIS switching, and first-character latency.
 

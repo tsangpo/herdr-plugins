@@ -4,7 +4,7 @@ import Foundation
 
 /// The reader can invalidate an in-flight query without waiting for that query.
 final class RemoteInbox {
-    private let lock = NSLock()
+    private let lock = NSCondition()
     private var revision: UInt64 = 1
     private var stopped = false
     private var failure: String?
@@ -12,6 +12,8 @@ final class RemoteInbox {
     private var departure: String?
     private var focusSample: UInt64 = 0
     private var focusSamplePending = false
+    private var modeReceipts: [String: (RemotePaneObservation, Date)] = [:]
+    private var identityRevision: UInt64 = 0
 
     struct View {
         let revision: UInt64
@@ -20,17 +22,20 @@ final class RemoteInbox {
         let focusAt: Date
         let departure: String?
         let focusSamplePending: Bool
+        let identityRevision: UInt64
     }
     func view() -> View {
         lock.lock(); defer { lock.unlock() }
         return View(revision: revision, stopped: stopped, failure: failure, focusAt: focusAt,
-                    departure: departure, focusSamplePending: focusSamplePending)
+                    departure: departure, focusSamplePending: focusSamplePending, identityRevision: identityRevision)
     }
     // Invalidate BEFORE dispatching to the main thread. Otherwise an already
     // queued switch can run first and become the supposed departure source.
     func beginFocusSample() -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         revision &+= 1
+        lock.broadcast()
+        identityRevision &+= 1
         focusSample &+= 1
         focusSamplePending = true
         focusAt = Date()
@@ -42,17 +47,41 @@ final class RemoteInbox {
         if departure == nil { departure = source }
         focusSamplePending = false
         revision &+= 1
+        lock.broadcast()
     }
-    func invalidate() {
+    func invalidate(structural: Bool = false, observation: RemotePaneObservation? = nil) {
         lock.lock(); defer { lock.unlock() }
+        if structural { identityRevision &+= 1; modeReceipts.removeAll() }
+        if let observation {
+            let previous = modeReceipts[observation.pane.paneID]?.0
+            if previous?.tokens != observation.tokens {
+                modeReceipts[observation.pane.paneID] = (observation, Date())
+            }
+        }
         revision &+= 1
+        lock.broadcast()
+    }
+    /// Predicate and wait share the writer lock; notifications coalesce into revision.
+    func wait(after revision: UInt64, until deadline: Date) {
+        lock.lock(); defer { lock.unlock() }
+        while self.revision == revision && !stopped && failure == nil && Date() < deadline {
+            _ = lock.wait(until: deadline)
+        }
+    }
+    func modeApplied(_ observation: RemotePaneObservation) -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        guard let (received, at) = modeReceipts[observation.pane.paneID],
+              received.pane == observation.pane, received.terminalID == observation.terminalID,
+              received.tokens == observation.tokens else { return nil }
+        modeReceipts.removeValue(forKey: observation.pane.paneID)
+        return at
     }
     func consumed(_ revision: UInt64) {
         lock.lock(); defer { lock.unlock() }
         if self.revision == revision { departure = nil }
     }
-    func fail(_ error: String) { lock.lock(); failure = error; revision &+= 1; lock.unlock() }
-    func stop() { lock.lock(); stopped = true; lock.unlock() }
+    func fail(_ error: String) { lock.lock(); failure = error; revision &+= 1; lock.broadcast(); lock.unlock() }
+    func stop() { lock.lock(); stopped = true; lock.broadcast(); lock.unlock() }
 }
 
 final class StopSignal {
@@ -62,7 +91,7 @@ final class StopSignal {
     func stop() { lock.lock(); value = true; lock.unlock() }
 }
 
-private struct RemoteStatus: Codable {
+private struct RemoteStatus: Codable, Equatable {
     let target: String
     let session: String
     let connection: String
@@ -72,6 +101,7 @@ private struct RemoteStatus: Codable {
     let state: SessionState
     let error: String?
     let focusError: String?
+    var metrics = RemoteMetrics()
     var processAlive: Bool? = nil
 }
 
@@ -89,7 +119,12 @@ final class RemoteBridge {
     private var store: Store?
     private var remoteSocket = ""
     private var lastError: String?
-    private var identityCache: [Int32: (Date, LocalProcessIdentity)] = [:]
+    private let diagnostics = RemoteDiagnostics()
+    private var stateWrites = RemoteWriteCache<SessionState>()
+    private var statusWrites = RemoteWriteCache<RemoteStatus>()
+    private var statusSchedule = RemoteStatusSchedule()
+    private var identityRevision: UInt64 = 0
+    private var identityCache = RemoteIdentityCache()
 
     init(options: RemoteOptions, directories: PluginDirectories, terminalFocus: RemoteTerminalFocus) {
         self.options = options
@@ -98,12 +133,21 @@ final class RemoteBridge {
     }
 
     private func status(_ connection: String) {
-        let value = RemoteStatus(target: options.target, session: options.session ?? "default",
+        var value = RemoteStatus(target: options.target, session: options.session ?? "default",
             connection: connection, pid: getpid(), socket: remoteSocket,
             ghosttyTerminalID: terminalFocus.surfaceID, state: state,
             error: lastError, focusError: onMain { terminalFocus.error })
         let path = directories.state.appendingPathComponent("remote-status.json")
-        do { try encodedJSON(value).write(to: path, options: .atomic) }
+        let now = Date()
+        // Business changes flush immediately; counters alone flush at most every two seconds.
+        value.metrics = statusWrites.saved?.metrics ?? RemoteMetrics()
+        let businessChanged = value != statusWrites.saved
+        guard statusSchedule.shouldWrite(businessChanged: businessChanged, now: now) else { return }
+        value.metrics = diagnostics.snapshot()
+        do {
+            try statusWrites.save(value) { try encodedJSON(value).write(to: path, options: .atomic) }
+            statusSchedule.succeeded(at: now)
+        }
         catch { log("cannot save remote status: \(error)") }
     }
 
@@ -124,20 +168,28 @@ final class RemoteBridge {
                 store = currentStore
                 state = .empty
                 terminalPanes = [:]
-                identityCache = [:]
+                identityCache.clear()
+                stateWrites = RemoteWriteCache()
                 lastError = nil
                 let inbox = RemoteInbox()
                 let readerDone = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async {
                     defer { readerDone.signal() }
                     do {
+                        var filter = RemoteEventFilter()
                         while !inbox.view().stopped && !self.stopSignal.stopped {
                             guard let event = try subscription.read(timeout: 0.2) else { continue }
-                            let kind = event["event"] as? String ?? event["type"] as? String ?? ""
+                            let kind = (event["event"] as? String ?? "").replacingOccurrences(of: ".", with: "_")
+                            let data = event["data"] as? [String: Any] ?? [:]
+                            self.diagnostics.update { $0.receivedEvents += 1 }
                             if kind == "events_lost" || (event["result"] as? [String: Any])?["type"] as? String == "events_lost" {
                                 throw KeeperError.message("Herdr events lost; resubscribing")
                             }
-                            let focus = kind == "pane_focused" || kind == "pane.focused"
+                            guard filter.accepts(kind: kind, data: data) else {
+                                self.diagnostics.update { $0.ignoredEvents += 1 }
+                                continue
+                            }
+                            let focus = kind == "pane_focused"
                             if focus {
                                 let sample = inbox.beginFocusSample()
                                 let source: String? = onMain {
@@ -146,7 +198,10 @@ final class RemoteBridge {
                                 }
                                 inbox.finishFocusSample(sample, source: source)
                             } else {
-                                inbox.invalidate()
+                                let observation = (data["pane"] as? [String: Any]).flatMap(RemotePaneObservation.init)
+                                let lifecycle = observation?.tokens["ime_keeper_event"]
+                                inbox.invalidate(structural: kind != "pane_updated" || observation == nil
+                                    || lifecycle == "suspend" || lifecycle == "exit", observation: observation)
                             }
                         }
                     } catch { inbox.fail(String(describing: error)) }
@@ -158,35 +213,51 @@ final class RemoteBridge {
                 }
                 var handled: UInt64 = 0
                 var wasFront = false
-                var healthAt = Date.distantPast
+                var health = RemoteHealthSchedule()
+                var terminalCheckAt = Date.distantPast
                 retry = 0.5
                 while !stopSignal.stopped {
-                    let front = onMain { terminalFocus.isSelected() }
-                    if front != wasFront {
-                        if !front {
-                            // Never interpret another application's source as an
-                            // editor choice when returning to Ghostty.
-                            state.relinquishInputObservation()
+                    let now = Date()
+                    var front = wasFront
+                    if now >= terminalCheckAt {
+                        front = onMain { terminalFocus.isSelected() }
+                        terminalCheckAt = Date().addingTimeInterval(0.1)
+                        if front != wasFront {
+                            if !front { state.relinquishInputObservation() }
+                            identityCache.clear()
+                            inbox.invalidate()
                         }
-                        inbox.invalidate()
                     }
                     let activated = front && !wasFront
                     wasFront = front
                     let view = inbox.view()
                     if let failure = view.failure { throw KeeperError.message(failure) }
-                    if view.focusSamplePending || Date().timeIntervalSince(view.focusAt) < 0.1 {
-                        Thread.sleep(forTimeInterval: 0.01)
+                    let stableAt = view.focusAt.addingTimeInterval(0.1)
+                    if view.focusSamplePending || Date() < stableAt {
+                        inbox.wait(after: view.revision, until: view.focusSamplePending
+                            ? terminalCheckAt : min(stableAt, terminalCheckAt))
                         continue
                     }
-                    if handled != view.revision || activated || Date() >= healthAt {
-                        if try reconcile(api: api, ssh: ssh, inbox: inbox, view: view, front: front) {
+                    let healthDue = health.isDue(at: Date())
+                    if handled != view.revision || activated || healthDue {
+                        let started = Date()
+                        diagnostics.update { $0.reconcileAttempts += 1 }
+                        let completed = try reconcile(api: api, ssh: ssh, inbox: inbox, view: view,
+                                                      front: front, forceIdentity: healthDue || activated)
+                        // Only actual health work advances its deadline. Mode activity cannot postpone it.
+                        if healthDue { health.checked(at: Date()) }
+                        diagnostics.update {
+                            $0.lastReconcileMs = Date().timeIntervalSince(started) * 1000
+                            if !completed && inbox.view().revision != view.revision { $0.revisionDiscards += 1 }
+                        }
+                        if completed {
                             handled = view.revision
                             inbox.consumed(view.revision)
-                            healthAt = Date().addingTimeInterval(2)
-                            status(front ? "connected" : "paused: remote Ghostty terminal is not focused")
                         }
                     }
-                    Thread.sleep(forTimeInterval: 0.02)
+                    status(front ? "connected" : "paused: remote Ghostty terminal is not focused")
+                    // Retry a rejected candidate on the next terminal tick, or immediately for a new event.
+                    inbox.wait(after: view.revision, until: min(terminalCheckAt, health.deadline))
                 }
             } catch {
                 lastError = String(describing: error)
@@ -201,8 +272,9 @@ final class RemoteBridge {
     }
 
     private func reconcile(api: HerdrAPI, ssh: RemoteSSH, inbox: RemoteInbox,
-                           view: RemoteInbox.View, front: Bool) throws -> Bool {
+                           view: RemoteInbox.View, front: Bool, forceIdentity: Bool) throws -> Bool {
         guard let store else { return false }
+        diagnostics.update { $0.snapshotQueries += 1 }
         let result = try api.request("session.snapshot")
         guard let snapshot = result["snapshot"] as? [String: Any],
               let rows = snapshot["panes"] as? [[String: Any]] else {
@@ -213,17 +285,18 @@ final class RemoteBridge {
         let ownership = InputOwner(directory: store.directory)
         if !ownership.isCurrent(store.key) { candidate.relinquishInputObservation() }
         var terminals: [String: Pane] = [:]
-        for row in rows {
-            let pane = try parsePane(row)
+        let parsed = try rows.map { (row: $0, pane: try parsePane($0)) }
+        for (row, pane) in parsed {
             if let terminal = row["terminal_id"] as? String {
                 terminals[terminal] = pane
                 if let old = terminalPanes[terminal], old != pane { candidate.movePane(from: old.paneID, to: pane) }
             }
         }
-        let ids = Set(try rows.map { try parsePane($0).paneID })
+        let ids = Set(parsed.map { $0.pane.paneID })
         for id in Set(candidate.panes.keys).union(candidate.editors.keys) where !ids.contains(id) { candidate.closePane(id) }
-        let focusedRow = rows.first { $0["pane_id"] as? String == focusedID }
-        let pane = try focusedRow.map(parsePane)
+        let focused = parsed.first { $0.pane.paneID == focusedID }
+        let focusedRow = focused?.row
+        let pane = focused?.pane
         let entering = candidate.currentPane?.paneID != focusedID
         let observed: String? = try onMain { front && terminalFocus.isSelected(fresh: true) ? try currentInputSourceID() : nil }
         if entering, let source = view.departure ?? observed {
@@ -232,24 +305,30 @@ final class RemoteBridge {
         }
         let session = EditorSession(sourceID: "ssh:" + options.target, sessionID: store.key)
         // Background panes update mode caches without sampling the global IME.
-        for row in rows where row["pane_id"] as? String != focusedID {
-            let background = try parsePane(row)
+        for (row, background) in parsed where background.paneID != focusedID {
             if let event = try? remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:]) {
                 _ = try candidate.receiveRemoteEditor(event, pane: background, session: session, observed: nil)
             } else { _ = candidate.releaseRemoteEditor(paneID: background.paneID) }
         }
         guard let row = focusedRow, let pane else {
             candidate.currentPane = nil
+            identityCache.clear()
             state = candidate
             terminalPanes = terminals
-            try store.save(state)
+            try stateWrites.save(state) { try store.save(state) }
             return true
         }
         let config = try loadConfiguration(directory: directories.config)
         let event = try remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:])
+        if forceIdentity || entering || event == nil || identityRevision != view.identityRevision
+            || event?.event == .exit || event?.event == .suspend {
+            identityCache.clear()
+        }
+        identityRevision = view.identityRevision
         var processes: [ForegroundProcess] = []
         if remoteNeedsProcesses(event: event, entering: entering,
                                 saved: candidate.panes[pane.paneID], rules: config.rules) {
+            diagnostics.update { $0.processQueries += 1 }
             let processResult = try api.request("pane.process_info", ["pane_id": pane.paneID])
             guard let info = processResult["process_info"] as? [String: Any] else {
                 throw KeeperError.message("Herdr process response is missing process_info")
@@ -261,11 +340,13 @@ final class RemoteBridge {
         var valid = false
         if let event {
             valid = editorIsForeground(pid: event.pid, processes: processes) { pid in
-                if let (time, identity) = self.identityCache[pid], Date().timeIntervalSince(time) < 1 { return identity }
-                guard let identity = ssh.identity(pid: pid) else { return nil }
-                self.identityCache[pid] = (Date(), identity)
-                return identity
+                let key = "\(pane.workspaceID):\(pane.tabID):\(pane.paneID):\(row["terminal_id"] ?? ""):\(event.instanceID):\(pid)"
+                return self.identityCache.identity(key: key, fresh: false) {
+                    self.diagnostics.update { $0.identityQueries += 1 }
+                    return ssh.identity(pid: pid)
+                }
             }
+            if !valid { identityCache.clear() }
             // Exit/suspend may arrive after the editor relinquishes foreground.
             if !valid, event.event == .exit || event.event == .suspend,
                let previous = candidate.editors[pane.paneID], previous.instanceID == event.instanceID,
@@ -275,10 +356,12 @@ final class RemoteBridge {
                                                    entering: entering, observed: observed, ordinaryTarget: desired)
         // Revalidate focus and metadata after process queries; never apply an
         // old snapshot over a newer mode or a focus event received meanwhile.
+        diagnostics.update { $0.currentQueries += 1 }
         let currentResult = try api.request("pane.current")
         guard let current = currentResult["pane"] as? [String: Any],
               current["pane_id"] as? String == pane.paneID,
-              current["tokens"] as? [String: String] == row["tokens"] as? [String: String],
+              let observation = RemotePaneObservation(row),
+              RemotePaneObservation(current) == observation,
               inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
         let applied = try onMain { () -> Bool in
             guard !self.stopSignal.stopped, inbox.view().revision == view.revision else { return false }
@@ -296,6 +379,13 @@ final class RemoteBridge {
                     do {
                         if latest != desired { try selectInputSource(desired, settle: false) }
                         candidate.editorSwitchSucceeded(paneID: pane.paneID)
+                        if let event, valid, candidate.editors[pane.paneID]?.appliedMode == event.mode,
+                           let received = inbox.modeApplied(observation) {
+                            self.diagnostics.update {
+                                $0.appliedModeEvents += 1
+                                $0.lastModeApplyMs = Date().timeIntervalSince(received) * 1000
+                            }
+                        }
                         entered = desired
                         self.lastError = nil
                         if candidate.editors[pane.paneID]?.lifecycle != .active, candidate.panes[pane.paneID] == nil {
@@ -316,7 +406,7 @@ final class RemoteBridge {
         guard applied else { return false }
         state = candidate
         terminalPanes = terminals
-        try store.save(state)
+        try stateWrites.save(state) { try store.save(state) }
         return true
     }
 }

@@ -180,8 +180,13 @@ Local Neovim continues calling Swift directly. Remote Neovim asynchronously
 publishes the same version 1 editor events through `pane.report_metadata`.
 The Mac subscribes to `pane.updated` and pane lifecycle events. There is no
 reverse SSH forward, separate mode socket, system service, or 100ms mode polling.
-Pane focus retains its 100ms stable window; a two-second health reconciliation
-also detects lost editor foreground ownership. Both transports share the editor
+Pane focus retains its 100ms stable window. Relevant events wake the worker
+immediately; identical heartbeats, titles, cwd and unrelated tokens do not trigger
+reconciliation. A separate two-second health schedule detects lost editor
+foreground ownership even during continuous mode changes. Each editor reconcile
+still queries foreground processes and revalidates the focused pane and IME tokens
+before applying. Kernel TUI/core identity is cached for at most one second and
+refreshed on health checks, focus entry and terminal reacquisition. Both transports share the editor
 policy: command modes use ABC, editing restores the editing source, and
 exit/suspend restores the pre-editor shell source.
 
@@ -230,7 +235,25 @@ Status includes the wrapper PID, registered Ghostty terminal ID, connection
 state, terminal detection errors, last error, remote socket,
 pane memories and editor modes. It remains available after exit and reports
 whether the recorded process is alive. Diagnostics are written to the plugin
-state directory instead of overwriting the interactive terminal.
+state directory instead of overwriting the interactive terminal. Unchanged session
+state is not rewritten. Status changes are written immediately; updates that only
+change metrics are flushed at most once every two seconds.
+
+The `metrics` object contains received/ignored event counts, reconcile attempts,
+revision discards, snapshot/process/current/SSH identity query counts, and
+`lastReconcileMs`. `lastModeApplyMs` measures local event receipt through successful
+mode application, including queueing and retries; `appliedModeEvents` counts those
+applications. It does not measure remote keystroke latency or the first Chinese
+character. Counters cover the wrapper lifetime, including auxiliary reconnects.
+
+An optional SSH integration test creates an isolated temporary Herdr server and
+two real Neovim TUIs, checks 30 seconds of idle event filtering, suspend/resume,
+exit/crash TTL cleanup and auxiliary reconnect. It needs Herdr and Neovim on the
+SSH target and never changes the desktop input source:
+
+```sh
+IME_KEEPER_REMOTE_TEST_HOST=ubuntu swift test --filter remoteRealTUIsAndIdleEventFiltering
+```
 
 In Neovim:
 
