@@ -3,7 +3,7 @@
 Remembers the selected macOS input source for each Herdr pane and restores it on focus.
 
 Optional Neovim / LazyVim integration switches to ABC in command modes and restores
-your editing input source in Insert / Replace. Requires macOS, Neovim 0.10+, and
+your editing input source in Insert / Replace. Requires macOS, Herdr 0.9.3+, Neovim 0.10+, and
 the enabled Herdr plugin for local integration. Remote mode requires Herdr 0.9.3+
 on both hosts, system OpenSSH with Unix socket forwarding, and Linux Neovim. Vim is not supported.
 
@@ -84,10 +84,15 @@ rewrite mappings or Neovim's `iminsert` / `imsearch` settings. Input-source IDs,
 not an IME's internal Chinese/English toggle, are remembered. Mode switching is
 event-driven, not continuous enforcement of ABC after a manual change in Normal.
 
-For local macOS Herdr panes, the Lua module obtains connection
-context through the `editor-context` action once, waiting at most two seconds for
-the matching command log. Mode reports call the Swift executable directly, in
-order, with a 1500ms timeout (customizable as `setup({ timeout_ms = 1500 })`).
+For local macOS Herdr panes, the Lua module finds the enabled plugin with one
+`herdr plugin list --json` call (two-second timeout). Mode reports call the
+Swift executable directly, in order, with a 1500ms timeout (customizable as
+`setup({ timeout_ms = 1500 })`). Swift queries the pane and foreground processes
+directly over `HERDR_SOCKET_PATH`, sharing a one-second socket deadline per
+local operation; it does not launch Herdr CLI processes for mode reports.
+Configuration and state use `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`
+when set, otherwise Herdr's XDG defaults. Keep these directory settings consistent
+between the Herdr server and pane environment.
 Failures warn once in Neovim and are available through
 `:lua vim.print(require("ime_keeper").status())`; a later event retries with a
 snapshot. If initialization failed, call `require("ime_keeper").setup()` again
@@ -213,8 +218,7 @@ Multiple editors in different panes are supported. Nested local Herdr launches
 are rejected. Local Herdr can remain open in other Ghostty tabs or windows:
 local hooks run when the remote terminal is not selected, and the remote
 wrapper controls input only while its terminal is selected. The global switch
-lock is held only during input-source operations. After upgrading from 0.3.0,
-restart the existing wrapper once to release its old lifetime control lock.
+lock is held only during input-source operations.
 
 ### Diagnostics and manual acceptance
 

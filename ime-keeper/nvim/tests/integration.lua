@@ -93,43 +93,45 @@ assert(tui_events[1].pid == tui_pid or tui_events[1].testParentPID == tui_pid, "
 assert(vim.iter(tui_events):any(function(event) return event.event == "mode" and event.mode == "edit" end))
 assert(tui_events[#tui_events].event == "exit")
 
--- Exercise context polling, argv handling, timeout/error propagation without
--- touching the user's Herdr registration or macOS input source.
-local original_system = vim.system
-local original_socket, original_pane = vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_PANE_ID
-vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_PANE_ID = "/tmp/ime-test.sock", "w:p"
+-- Exercise plugin discovery and inherited pane environment without changing IME.
+local original_system, original_executable = vim.system, vim.fn.executable
 local calls = {}
-local context = {
-  version = "1", sourceID = "local", socketPath = vim.env.HERDR_SOCKET_PATH,
-  configDirectory = "/tmp/config with spaces", stateDirectory = "/tmp/state with spaces",
-  executable = "/tmp/plugin with spaces/ime-keeper", herdrExecutable = "/tmp/herdr",
+local entries = {
+  { plugin_id = "other", enabled = true, plugin_root = "/wrong" },
+  { plugin_id = "tsangpo.ime-keeper", enabled = true, plugin_root = "/tmp/plugin with spaces" },
 }
+vim.fn.executable = function(path)
+  assert(path == "/tmp/plugin with spaces/.build/release/ime-keeper")
+  return 1
+end
 vim.system = function(argv, opts)
   table.insert(calls, { argv = argv, opts = opts })
   return { wait = function(_, timeout)
     assert(timeout > 0 and timeout <= 2000)
-    if argv[3] == "action" then
-      return { code = 0, stdout = vim.json.encode({ result = { log = { log_id = "123", status = "running" } } }) }
-    elseif argv[3] == "log" then
-      return { code = 0, stdout = vim.json.encode({ result = { logs = {
-        { log_id = "other", status = "succeeded", stdout = "not our result" },
-        { log_id = "123", status = "succeeded", stdout = vim.json.encode(context) },
-      } } }) }
+    if argv[2] == "plugin" then
+      assert(argv[3] == "list" and argv[4] == "--json")
+      return { code = 0, stdout = vim.json.encode({ result = { plugins = entries } }) }
     end
     return { code = 0, stdout = "" }
   end }
 end
-local reporter = require("ime_keeper.local_transport").connect({})
+local adapter = require("ime_keeper.local_transport")
+local reporter = adapter.connect({})
 reporter({ event = "mode", mode = "edit" })
-assert(#calls == 3)
-assert(calls[3].argv[1] == context.executable and calls[3].argv[2] == "editor-event")
-assert(vim.json.decode(calls[3].argv[3]).mode == "edit")
-assert(calls[3].opts.env.HERDR_PANE_ID == "w:p")
-assert(calls[3].opts.env.HERDR_PLUGIN_STATE_DIR == context.stateDirectory)
+assert(#calls == 2)
+assert(calls[2].argv[1] == "/tmp/plugin with spaces/.build/release/ime-keeper")
+assert(calls[2].argv[2] == "editor-event" and vim.json.decode(calls[2].argv[3]).mode == "edit")
+assert(calls[2].opts.env == nil, "must inherit pane environment")
+entries[2].enabled = false
+assert(not pcall(adapter.connect, {}), "disabled plugin must not initialize")
+entries = {}
+assert(not pcall(adapter.connect, {}), "missing plugin must not initialize")
+entries = {{ plugin_id = "tsangpo.ime-keeper", enabled = true, plugin_root = "/tmp/plugin with spaces" }}
+vim.fn.executable = function() return 0 end
+assert(not pcall(adapter.connect, {}), "missing binary must not initialize")
 vim.system = function() return { wait = function() return { code = 124, stderr = "timeout" } end } end
 assert(not pcall(reporter, { event = "mode" }), "transport failures must propagate")
-vim.system = original_system
-vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_PANE_ID = original_socket, original_pane
+vim.system, vim.fn.executable = original_system, original_executable
 
 -- Late loading (including a LazyVim config loaded after VimEnter) synchronizes
 -- immediately, and failed reports recover by sending a snapshot.

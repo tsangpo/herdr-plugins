@@ -4,7 +4,6 @@ import Testing
 
 private let pane = Pane(paneID: "p", workspaceID: "w", tabID: "t")
 private let session = EditorSession(sourceID: "local", sessionID: "session")
-private let context = EditorContext(session: session, pane: pane)
 private let abc = EditorMemory.commandInputSourceID
 
 private func event(_ sequence: UInt64, _ kind: EditorEventKind, _ mode: EditorMode = .command, instance: String = "nvim-1") -> EditorEvent {
@@ -12,7 +11,7 @@ private func event(_ sequence: UInt64, _ kind: EditorEventKind, _ mode: EditorMo
 }
 
 private func receive(_ state: inout SessionState, _ event: EditorEvent, _ source: String?) throws -> String? {
-    try state.receiveEditor(event, context: context, expectedSession: session, observedInputSourceID: source)
+    try state.receiveEditor(event, session: session, pane: pane, observedInputSourceID: source)
 }
 
 @Test func modeTransitionsRememberManualEditingChangesWithoutSavingABC() throws {
@@ -118,15 +117,14 @@ private func receive(_ state: inout SessionState, _ event: EditorEvent, _ source
 @Test func sourceNamespacesAndSnapshotRecoveryAreIsolated() throws {
     var state = SessionState.empty
     let remoteSession = EditorSession(sourceID: "ssh:workbox", sessionID: "session")
-    let remoteContext = EditorContext(session: remoteSession, pane: pane)
     let snapshot = event(10, .snapshot, .edit)
-    #expect(try state.receiveEditor(snapshot, context: remoteContext, expectedSession: session, observedInputSourceID: "Pinyin") == nil)
-    #expect(state.editors.isEmpty)
-    #expect(try state.receiveEditor(snapshot, context: remoteContext, expectedSession: remoteSession, observedInputSourceID: nil) == nil)
+    #expect(try state.receiveEditor(snapshot, session: remoteSession, pane: pane, observedInputSourceID: nil) == nil)
     #expect(state.editors["p"]?.session == remoteSession)
     #expect(state.editors["p"]?.targetOnFocus(baseInputSourceID: "Pinyin") == "Pinyin")
     let recovered = state
-    _ = try state.receiveEditor(event(9, .mode), context: remoteContext, expectedSession: remoteSession, observedInputSourceID: "wrong")
+    _ = try state.receiveEditor(event(11, .mode), session: session, pane: pane, observedInputSourceID: "wrong session")
+    #expect(state == recovered)
+    _ = try state.receiveEditor(event(9, .mode), session: remoteSession, pane: pane, observedInputSourceID: "wrong")
     #expect(state == recovered)
 }
 

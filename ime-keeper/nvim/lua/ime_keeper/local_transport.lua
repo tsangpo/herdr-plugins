@@ -1,5 +1,4 @@
 local M = {}
-local uv = vim.uv or vim.loop
 local plugin = "tsangpo.ime-keeper"
 
 local function command(argv, timeout, env)
@@ -20,39 +19,23 @@ function M.connect(opts)
     error("Neovim 0.10 or newer is required")
   end
   local herdr = opts.herdr or vim.env.HERDR_BIN_PATH or "herdr"
-  local deadline = uv.hrtime() + 2000000000
-  local function remaining()
-    local ms = math.floor((deadline - uv.hrtime()) / 1000000)
-    if ms <= 0 then error("editor-context initialization timed out") end
-    return ms
-  end
-  local invocation = payload(command({ herdr, "plugin", "action", "invoke", "editor-context", "--plugin", plugin }, remaining()))
-  local log = assert(invocation.log, "missing editor-context log")
-  local log_id = assert(log.log_id, "missing editor-context log_id")
-  while log.status == "running" do
-    vim.wait(math.min(25, remaining()))
-    local result = payload(command({ herdr, "plugin", "log", "list", "--plugin", plugin, "--limit", "100" }, remaining()))
-    for _, row in ipairs(result.logs or {}) do
-      if row.log_id == log_id then log = row; break end
+  local result = payload(command({ herdr, "plugin", "list", "--json" }, 2000))
+  local root
+  for _, entry in ipairs(result.plugins or {}) do
+    if entry.plugin_id == plugin and entry.enabled == true then
+      root = entry.plugin_root
+      break
     end
   end
-  if log.status ~= "succeeded" then error(log.stderr or log.error or "editor-context failed") end
-  local stdout = assert(log.stdout, "missing editor-context output")
-  local context = vim.json.decode(stdout)
-  if context.version ~= "1" or context.sourceID ~= "local" or context.socketPath ~= vim.env.HERDR_SOCKET_PATH then
-    error("incompatible editor-context or session mismatch")
+  if type(root) ~= "string" or root == "" then
+    error("IME Keeper is not installed and enabled in this Herdr session")
   end
-  local env = {
-    HERDR_PLUGIN_CONFIG_DIR = assert(context.configDirectory),
-    HERDR_PLUGIN_STATE_DIR = assert(context.stateDirectory),
-    HERDR_SOCKET_PATH = context.socketPath,
-    HERDR_BIN_PATH = assert(context.herdrExecutable),
-    -- Capture the originating pane; the Swift adapter resolves pane moves by instance.
-    HERDR_PANE_ID = vim.env.HERDR_PANE_ID,
-  }
-  local executable = assert(context.executable)
+  local executable = root .. "/.build/release/ime-keeper"
+  if vim.fn.executable(executable) ~= 1 then
+    error("IME Keeper executable not found; build or reinstall the Herdr plugin: " .. executable)
+  end
   return function(event)
-    command({ executable, "editor-event", vim.json.encode(event) }, opts.timeout_ms or 1500, env)
+    command({ executable, "editor-event", vim.json.encode(event) }, opts.timeout_ms or 1500)
     return true
   end
 end

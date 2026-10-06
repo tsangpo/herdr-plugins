@@ -27,11 +27,6 @@ struct EditorEvent: Codable, Equatable {
     }
 }
 
-struct EditorContext: Codable, Equatable {
-    let session: EditorSession
-    let pane: Pane
-}
-
 struct EditorMemory: Codable, Equatable {
     let session: EditorSession
     let instanceID: String
@@ -65,22 +60,21 @@ extension SessionState {
     /// nil observation means this pane is in the background: never sample the
     /// global IME or request a switch. Process/pane validation belongs to transport.
     mutating func receiveEditor(
-        _ event: EditorEvent, context: EditorContext, expectedSession: EditorSession,
+        _ event: EditorEvent, session: EditorSession, pane: Pane,
         observedInputSourceID: String?
     ) throws -> String? {
         try event.validate()
-        guard context.session == expectedSession else { return nil }
-        let paneID = context.pane.paneID
+        let paneID = pane.paneID
         var memory: EditorMemory
         if let previous = editors[paneID], previous.instanceID == event.instanceID {
-            guard previous.session == context.session, previous.pid == event.pid,
+            guard previous.session == session, previous.pid == event.pid,
                   event.sequence > previous.sequence, previous.lifecycle != .exited else { return nil }
             memory = previous
         } else {
             guard event.event == .start || event.event == .snapshot else { return nil }
             memory = EditorMemory(
-                session: context.session, instanceID: event.instanceID, pid: event.pid,
-                pane: context.pane, sequence: 0, mode: event.mode, lifecycle: .active
+                session: session, instanceID: event.instanceID, pid: event.pid,
+                pane: pane, sequence: 0, mode: event.mode, lifecycle: .active
             )
         }
 
@@ -97,7 +91,7 @@ extension SessionState {
             }
         }
         memory.sequence = event.sequence
-        memory.pane = context.pane
+        memory.pane = pane
         memory.mode = event.mode
         // Keep the physical policy until switching succeeds or departure is
         // sampled. Incoming modes alone must not acknowledge a TIS operation.

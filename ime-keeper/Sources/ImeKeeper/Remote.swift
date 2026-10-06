@@ -43,15 +43,9 @@ final class RemoteInbox {
         focusSamplePending = false
         revision &+= 1
     }
-    func invalidate(focus: Bool = false, source: String? = nil) {
+    func invalidate() {
         lock.lock(); defer { lock.unlock() }
         revision &+= 1
-        if focus {
-            focusAt = Date()
-            // The first departure belongs to the last applied pane. Intermediate
-            // panes in a rapid burst never owned the input source.
-            if departure == nil { departure = source }
-        }
     }
     func consumed(_ revision: UInt64) {
         lock.lock(); defer { lock.unlock() }
@@ -59,6 +53,26 @@ final class RemoteInbox {
     }
     func fail(_ error: String) { lock.lock(); failure = error; revision &+= 1; lock.unlock() }
     func stop() { lock.lock(); stopped = true; lock.unlock() }
+}
+
+final class StopSignal {
+    private let lock = NSLock()
+    private var value = false
+    var stopped: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func stop() { lock.lock(); value = true; lock.unlock() }
+}
+
+private struct RemoteStatus: Codable {
+    let target: String
+    let session: String
+    let connection: String
+    let pid: Int32
+    let socket: String
+    let ghosttyTerminalID: String
+    let state: SessionState
+    let error: String?
+    let focusError: String?
+    var processAlive: Bool? = nil
 }
 
 private func onMain<T>(_ operation: () throws -> T) rethrows -> T {
@@ -69,7 +83,7 @@ final class RemoteBridge {
     let options: RemoteOptions
     let directories: PluginDirectories
     let terminalFocus: RemoteTerminalFocus
-    let stopSignal = RemoteInbox()
+    let stopSignal = StopSignal()
     private var state = SessionState.empty
     private var terminalPanes: [String: Pane] = [:]
     private var store: Store?
@@ -83,27 +97,19 @@ final class RemoteBridge {
         self.terminalFocus = terminalFocus
     }
 
-    private func configuration() throws -> Configuration {
-        let path = directories.config.appendingPathComponent("config.json")
-        if !FileManager.default.fileExists(atPath: path.path) { return Configuration(version: 1, rules: []) }
-        return try Configuration.decode(Data(contentsOf: path))
-    }
-
     private func status(_ connection: String) {
-        var value: [String: Any] = ["target": options.target, "session": options.session ?? "default",
-            "connection": connection, "pid": getpid(), "socket": remoteSocket,
-            "ghosttyTerminalID": terminalFocus.surfaceID,
-            "state": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(state))) ?? [:]]
-        if let lastError { value["error"] = lastError }
-        if let focusError = onMain({ terminalFocus.error }) { value["focusError"] = focusError }
+        let value = RemoteStatus(target: options.target, session: options.session ?? "default",
+            connection: connection, pid: getpid(), socket: remoteSocket,
+            ghosttyTerminalID: terminalFocus.surfaceID, state: state,
+            error: lastError, focusError: onMain { terminalFocus.error })
         let path = directories.state.appendingPathComponent("remote-status.json")
-        do { try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: path, options: .atomic) }
+        do { try encodedJSON(value).write(to: path, options: .atomic) }
         catch { log("cannot save remote status: \(error)") }
     }
 
     func run() {
         var retry: TimeInterval = 0.5
-        while !stopSignal.view().stopped {
+        while !stopSignal.stopped {
             do {
                 let ssh = try RemoteSSH(options: options)
                 defer { ssh.stop() }
@@ -125,7 +131,7 @@ final class RemoteBridge {
                 DispatchQueue.global().async {
                     defer { readerDone.signal() }
                     do {
-                        while !inbox.view().stopped && !self.stopSignal.view().stopped {
+                        while !inbox.view().stopped && !self.stopSignal.stopped {
                             guard let event = try subscription.read(timeout: 0.2) else { continue }
                             let kind = event["event"] as? String ?? event["type"] as? String ?? ""
                             if kind == "events_lost" || (event["result"] as? [String: Any])?["type"] as? String == "events_lost" {
@@ -154,7 +160,7 @@ final class RemoteBridge {
                 var wasFront = false
                 var healthAt = Date.distantPast
                 retry = 0.5
-                while !stopSignal.view().stopped {
+                while !stopSignal.stopped {
                     let front = onMain { terminalFocus.isSelected() }
                     if front != wasFront {
                         if !front {
@@ -187,7 +193,7 @@ final class RemoteBridge {
                 status("disconnected; retrying")
                 // Do not write diagnostics over the interactive terminal.
                 let deadline = Date().addingTimeInterval(retry)
-                while !stopSignal.view().stopped && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+                while !stopSignal.stopped && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
                 retry = min(retry * 2, 8)
             }
         }
@@ -208,16 +214,16 @@ final class RemoteBridge {
         if !ownership.isCurrent(store.key) { candidate.relinquishInputObservation() }
         var terminals: [String: Pane] = [:]
         for row in rows {
-            let pane = try remotePane(row)
+            let pane = try parsePane(row)
             if let terminal = row["terminal_id"] as? String {
                 terminals[terminal] = pane
                 if let old = terminalPanes[terminal], old != pane { candidate.movePane(from: old.paneID, to: pane) }
             }
         }
-        let ids = Set(try rows.map { try remotePane($0).paneID })
+        let ids = Set(try rows.map { try parsePane($0).paneID })
         for id in Set(candidate.panes.keys).union(candidate.editors.keys) where !ids.contains(id) { candidate.closePane(id) }
         let focusedRow = rows.first { $0["pane_id"] as? String == focusedID }
-        let pane = try focusedRow.map(remotePane)
+        let pane = try focusedRow.map(parsePane)
         let entering = candidate.currentPane?.paneID != focusedID
         let observed: String? = try onMain { front && terminalFocus.isSelected(fresh: true) ? try currentInputSourceID() : nil }
         if entering, let source = view.departure ?? observed {
@@ -227,7 +233,7 @@ final class RemoteBridge {
         let session = EditorSession(sourceID: "ssh:" + options.target, sessionID: store.key)
         // Background panes update mode caches without sampling the global IME.
         for row in rows where row["pane_id"] as? String != focusedID {
-            let background = try remotePane(row)
+            let background = try parsePane(row)
             if let event = try? remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:]) {
                 _ = try candidate.receiveRemoteEditor(event, pane: background, session: session, observed: nil)
             } else { _ = candidate.releaseRemoteEditor(paneID: background.paneID) }
@@ -239,7 +245,7 @@ final class RemoteBridge {
             try store.save(state)
             return true
         }
-        let config = try configuration()
+        let config = try loadConfiguration(directory: directories.config)
         let event = try remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:])
         var processes: [ForegroundProcess] = []
         if remoteNeedsProcesses(event: event, entering: entering,
@@ -248,7 +254,7 @@ final class RemoteBridge {
             guard let info = processResult["process_info"] as? [String: Any] else {
                 throw KeeperError.message("Herdr process response is missing process_info")
             }
-            processes = remoteProcesses(info)
+            processes = parseProcesses(info)
         }
         var desired = entering ? desiredInputSource(saved: candidate.panes[pane.paneID],
             ruleInputSourceID: matchingInputSource(rules: config.rules, processes: processes)) : nil
@@ -275,37 +281,37 @@ final class RemoteBridge {
               current["tokens"] as? [String: String] == row["tokens"] as? [String: String],
               inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
         let applied = try onMain { () -> Bool in
-            guard !self.stopSignal.view().stopped, inbox.view().revision == view.revision else { return false }
+            guard !self.stopSignal.stopped, inbox.view().revision == view.revision else { return false }
             guard front else { return true }
-            let lock = try FileLock(path: store.switchLockPath)
-            defer { withExtendedLifetime(lock) {} }
-            guard self.terminalFocus.isSelected(fresh: true) else { return false }
-            // The lock and AppleScript query can both wait. A focus event may
-            // have invalidated this candidate during either operation.
-            guard inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
-            let latest = try currentInputSourceID()
-            let manuallyChanged = candidate.acceptRemoteManualSource(pane: pane,
-                baseline: view.departure ?? observed, current: latest)
-            var entered = latest
-            if let desired, !manuallyChanged {
-                do {
-                    if latest != desired { try selectInputSource(desired, settle: false) }
-                    candidate.editorSwitchSucceeded(paneID: pane.paneID)
-                    entered = desired
-                    self.lastError = nil
-                    if candidate.editors[pane.paneID]?.lifecycle != .active, candidate.panes[pane.paneID] == nil {
-                        candidate.panes[pane.paneID] = PaneMemory(inputSourceID: desired, workspaceID: pane.workspaceID, tabID: pane.tabID)
+            return try FileLock.with(path: store.switchLockPath) {
+                guard self.terminalFocus.isSelected(fresh: true) else { return false }
+                // The lock and AppleScript query can both wait. A focus event may
+                // have invalidated this candidate during either operation.
+                guard inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
+                let latest = try currentInputSourceID()
+                let manuallyChanged = candidate.acceptRemoteManualSource(pane: pane,
+                    baseline: view.departure ?? observed, current: latest)
+                var entered = latest
+                if let desired, !manuallyChanged {
+                    do {
+                        if latest != desired { try selectInputSource(desired, settle: false) }
+                        candidate.editorSwitchSucceeded(paneID: pane.paneID)
+                        entered = desired
+                        self.lastError = nil
+                        if candidate.editors[pane.paneID]?.lifecycle != .active, candidate.panes[pane.paneID] == nil {
+                            candidate.panes[pane.paneID] = PaneMemory(desired, pane: pane)
+                        }
+                    } catch {
+                        // Preserve both reported mode and last applied policy for
+                        // retry; a TIS failure is not a transport disconnect.
+                        self.lastError = String(describing: error)
                     }
-                } catch {
-                    // Preserve both reported mode and last applied policy for
-                    // retry; a TIS failure is not a transport disconnect.
-                    self.lastError = String(describing: error)
                 }
+                try ownership.claim(store.key)
+                candidate.currentPane = pane
+                if entering { candidate.entryInputSourceID = entered }
+                return true
             }
-            try ownership.claim(store.key)
-            candidate.currentPane = pane
-            if entering { candidate.entryInputSourceID = entered }
-            return true
         }
         guard applied else { return false }
         state = candidate
@@ -317,9 +323,9 @@ final class RemoteBridge {
 
 func remoteStatus() throws {
     let path = PluginDirectories(environment: environment).state.appendingPathComponent("remote-status.json")
-    var value = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any] ?? [:]
-    if let pid = value["pid"] as? Int32 { value["processAlive"] = kill(pid, 0) == 0 }
-    FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]))
+    var value = try JSONDecoder().decode(RemoteStatus.self, from: Data(contentsOf: path))
+    value.processAlive = kill(value.pid, 0) == 0
+    FileHandle.standardOutput.write(try encodedJSON(value))
     FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
@@ -330,16 +336,13 @@ func runRemote(arguments: [String]) throws {
     }
     guard isatty(STDIN_FILENO) == 1 else { throw KeeperError.message("remote requires an interactive terminal") }
     let directories = PluginDirectories(environment: environment)
-    let store = try Store(directory: directories.state, key: "remote-owner")
-    _ = try localInputAllowed(store: store)
+    try FileManager.default.createDirectory(at: directories.state, withIntermediateDirectories: true)
     guard let surfaceID = try focusedGhosttySurface() else {
         throw KeeperError.message("start remote from the selected Ghostty terminal; its surface ID could not be determined")
     }
     let registration = try RemoteRegistration(directory: directories.state, surfaceID: surfaceID)
     defer { withExtendedLifetime(registration) {} }
-    if FileManager.default.fileExists(atPath: directories.config.appendingPathComponent("config.json").path) {
-        _ = try Configuration.decode(Data(contentsOf: directories.config.appendingPathComponent("config.json")))
-    }
+    _ = try loadConfiguration(directory: directories.config)
     let client = Process()
     client.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     client.arguments = [environment["HERDR_BIN_PATH"] ?? "herdr", "--remote", options.target] + options.sessionArguments

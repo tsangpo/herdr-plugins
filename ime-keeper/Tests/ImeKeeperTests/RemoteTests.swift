@@ -87,9 +87,9 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
 
 @Test func focusBurstKeepsFirstDepartureAndRejectsStaleAcknowledgement() {
     let inbox = RemoteInbox()
-    inbox.invalidate(focus: true, source: "pinyin")
+    inbox.finishFocusSample(inbox.beginFocusSample(), source: "pinyin")
     let old = inbox.view()
-    inbox.invalidate(focus: true, source: "ABC")
+    inbox.finishFocusSample(inbox.beginFocusSample(), source: "ABC")
     inbox.consumed(old.revision)
     #expect(inbox.view().departure == "pinyin")
     #expect(inbox.view().revision > old.revision)
@@ -222,18 +222,6 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     try JSONEncoder().encode(stale).write(to: directory.appendingPathComponent("remote-controller.json"))
     #expect(try RemoteRegistration.active(in: directory) == nil)
     #expect(try localInputAllowed(store: store, query: { "remote-tab" }))
-}
-
-@Test func legacyWrapperRequiresRestartRatherThanRacingLocalHooks() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try Store(directory: directory, key: "test")
-    let legacy = try FileLock(path: directory.appendingPathComponent("control-owner.lock").path)
-    defer { withExtendedLifetime(legacy) {} }
-    let error = #expect(throws: KeeperError.self) {
-        try localInputAllowed(store: store, query: { "local-tab" })
-    }
-    #expect(error?.description == "restart the older ime-keeper remote client to enable terminal-scoped ownership")
 }
 
 @Test func ownershipHandoffCannotSampleAnotherTerminalsInput() throws {

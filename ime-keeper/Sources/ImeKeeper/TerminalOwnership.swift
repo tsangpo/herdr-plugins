@@ -87,25 +87,14 @@ final class RemoteRegistration {
     }
 
     static func active(in directory: URL) throws -> Record? {
-        do {
-            let probe = try FileLock(path: lockPath(directory), nonblocking: true)
-            withExtendedLifetime(probe) {}
-            return nil // Ignore files left by a crashed process.
-        } catch let error as KeeperError where error.description == "lock busy" {
-            return try JSONDecoder().decode(Record.self, from: Data(contentsOf: directory.appendingPathComponent("remote-controller.json")))
+        if let probe = try FileLock.tryAcquire(path: lockPath(directory)) {
+            return withExtendedLifetime(probe) { nil } // Ignore files left by a crashed process.
         }
+        return try JSONDecoder().decode(Record.self, from: Data(contentsOf: directory.appendingPathComponent("remote-controller.json")))
     }
 }
 
 func localInputAllowed(store: Store, query: () throws -> String? = focusedGhosttySurface) throws -> Bool {
-    // A previously launched 0.3.0 binary still uses a lifetime control lock.
-    // Do not race it after rebuilding; report the required client restart.
-    do {
-        let legacy = try FileLock(path: store.directory.appendingPathComponent("control-owner.lock").path, nonblocking: true)
-        withExtendedLifetime(legacy) {}
-    } catch let error as KeeperError where error.description == "lock busy" {
-        throw KeeperError.message("restart the older ime-keeper remote client to enable terminal-scoped ownership")
-    }
     guard let remote = try RemoteRegistration.active(in: store.directory) else { return true }
     return terminalCanControl(remoteSurface: remote.surfaceID, focusedSurface: try query(), remote: false)
 }

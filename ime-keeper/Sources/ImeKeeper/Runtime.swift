@@ -23,19 +23,33 @@ func sessionKey(_ value: String) -> String {
     return String(hash, radix: 16)
 }
 
+enum LockError: Error { case busy }
+
 final class FileLock {
     let descriptor: Int32
 
     init(path: String, nonblocking: Bool = false) throws {
-        descriptor = Darwin.open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else { throw KeeperError.message("cannot open lock \(path): \(String(cString: strerror(errno)))") }
-        _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC)
+        let opened = Darwin.open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard opened >= 0 else { throw KeeperError.message("cannot open lock \(path): \(String(cString: strerror(errno)))") }
+        _ = fcntl(opened, F_SETFD, FD_CLOEXEC)
         let operation = LOCK_EX | (nonblocking ? LOCK_NB : 0)
-        guard flock(descriptor, operation) == 0 else {
+        guard flock(opened, operation) == 0 else {
             let code = errno
-            Darwin.close(descriptor)
-            throw KeeperError.message(code == EWOULDBLOCK ? "lock busy" : "cannot lock \(path): \(String(cString: strerror(code)))")
+            Darwin.close(opened)
+            if code == EWOULDBLOCK { throw LockError.busy }
+            throw KeeperError.message("cannot lock \(path): \(String(cString: strerror(code)))")
         }
+        descriptor = opened
+    }
+
+    static func tryAcquire(path: String) throws -> FileLock? {
+        do { return try FileLock(path: path, nonblocking: true) }
+        catch LockError.busy { return nil }
+    }
+
+    static func with<T>(path: String, _ body: () throws -> T) throws -> T {
+        let lock = try FileLock(path: path)
+        return try withExtendedLifetime(lock, body)
     }
 
     deinit {
@@ -53,9 +67,12 @@ struct Store {
     let directory: URL
     let key: String
 
-    init() throws {
-        directory = URL(fileURLWithPath: try requireEnvironment("HERDR_PLUGIN_STATE_DIR"), isDirectory: true)
-        key = sessionKey(try requireEnvironment("HERDR_SOCKET_PATH"))
+    init(environment values: [String: String] = environment) throws {
+        directory = PluginDirectories(environment: values).state
+        guard let socket = values["HERDR_SOCKET_PATH"], !socket.isEmpty else {
+            throw KeeperError.message("missing HERDR_SOCKET_PATH")
+        }
+        key = sessionKey(socket)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -65,6 +82,7 @@ struct Store {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
+    var ownerID: String { "local:" + key }
     var stateURL: URL { directory.appendingPathComponent("session-\(key).json") }
     var stateLockPath: String { directory.appendingPathComponent("session-\(key).state.lock").path }
     var focusLockPath: String { directory.appendingPathComponent("session-\(key).focus.lock").path }
@@ -78,9 +96,7 @@ struct Store {
     }
 
     func save(_ state: SessionState) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(state).write(to: stateURL, options: .atomic)
+        try encodedJSON(state).write(to: stateURL, options: .atomic)
     }
 
     func markDirty(inputSourceID: String) throws {
@@ -94,16 +110,34 @@ struct Store {
     }
 }
 
-func configPath() throws -> URL {
-    URL(fileURLWithPath: try requireEnvironment("HERDR_PLUGIN_CONFIG_DIR"), isDirectory: true)
-        .appendingPathComponent("config.json")
+struct PluginDirectories {
+    let config: URL
+    let state: URL
+
+    init(environment: [String: String]) {
+        let home = environment["HOME"] ?? NSHomeDirectory()
+        config = URL(fileURLWithPath: environment["HERDR_PLUGIN_CONFIG_DIR"] ??
+            (environment["XDG_CONFIG_HOME"] ?? home + "/.config") + "/herdr/plugins/config/tsangpo.ime-keeper")
+        state = URL(fileURLWithPath: environment["HERDR_PLUGIN_STATE_DIR"] ??
+            (environment["XDG_STATE_HOME"] ?? home + "/.local/state") + "/herdr/plugins/tsangpo.ime-keeper")
+    }
 }
 
-func loadConfiguration() throws -> Configuration {
-    let path = try configPath()
+func configPath(directory: URL = PluginDirectories(environment: environment).config) -> URL {
+    directory.appendingPathComponent("config.json")
+}
+
+func loadConfiguration(directory: URL = PluginDirectories(environment: environment).config) throws -> Configuration {
+    let path = configPath(directory: directory)
     guard FileManager.default.fileExists(atPath: path.path) else { return Configuration(version: 1, rules: []) }
     do { return try Configuration.decode(Data(contentsOf: path)) }
     catch { throw KeeperError.message("invalid config \(path.path): \(error)") }
+}
+
+func encodedJSON<T: Encodable>(_ value: T) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    return try encoder.encode(value)
 }
 
 func sourceProperty<T>(_ source: TISInputSource, _ key: CFString, as type: T.Type) -> T? {

@@ -62,11 +62,3 @@ import Testing
     let unsupported = Data(#"{"version":2,"rules":[]}"#.utf8)
     #expect(throws: (any Error).self) { try Configuration.decode(unsupported) }
 }
-
-@Test func herdrCLIResponsePayloadIsUnwrapped() {
-    let response: [String: Any] = [
-        "id": "cli:pane:current",
-        "result": ["type": "pane_current", "pane": ["pane_id": "w1:p1"]],
-    ]
-    #expect(responsePayload(response, named: "pane")?["pane_id"] as? String == "w1:p1")
-}

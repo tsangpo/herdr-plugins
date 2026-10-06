@@ -1,19 +1,6 @@
 import Darwin
 import Foundation
 
-struct PluginDirectories {
-    let config: URL
-    let state: URL
-
-    init(environment: [String: String]) {
-        let home = environment["HOME"] ?? NSHomeDirectory()
-        config = URL(fileURLWithPath: environment["HERDR_PLUGIN_CONFIG_DIR"] ??
-            (environment["XDG_CONFIG_HOME"] ?? home + "/.config") + "/herdr/plugins/config/tsangpo.ime-keeper")
-        state = URL(fileURLWithPath: environment["HERDR_PLUGIN_STATE_DIR"] ??
-            (environment["XDG_STATE_HOME"] ?? home + "/.local/state") + "/herdr/plugins/tsangpo.ime-keeper")
-    }
-}
-
 final class RemoteSSH {
     let options: RemoteOptions
     let directory: URL

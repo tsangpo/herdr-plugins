@@ -34,6 +34,12 @@ struct PaneMemory: Codable, Equatable {
     var tabID: String
 }
 
+extension PaneMemory {
+    init(_ source: String, pane: Pane) {
+        self.init(inputSourceID: source, workspaceID: pane.workspaceID, tabID: pane.tabID)
+    }
+}
+
 struct SessionState: Codable, Equatable {
     var currentPane: Pane?
     var entryInputSourceID: String?
@@ -51,11 +57,7 @@ struct SessionState: Codable, Equatable {
             return
         }
         if panes[pane.paneID] != nil || currentInputSourceID != entryInputSourceID {
-            panes[pane.paneID] = PaneMemory(
-                inputSourceID: currentInputSourceID,
-                workspaceID: pane.workspaceID,
-                tabID: pane.tabID
-            )
+            panes[pane.paneID] = PaneMemory(currentInputSourceID, pane: pane)
         }
     }
 
@@ -123,12 +125,6 @@ func matchingInputSource(rules: [Rule], processes: [ForegroundProcess]) -> Strin
 
 func desiredInputSource(saved: PaneMemory?, ruleInputSourceID: String?) -> String? {
     saved?.inputSourceID ?? ruleInputSourceID
-}
-
-func responsePayload(_ value: Any, named key: String) -> [String: Any]? {
-    guard let envelope = value as? [String: Any] else { return nil }
-    let result = (envelope["result"] as? [String: Any]) ?? envelope
-    return (result[key] as? [String: Any]) ?? result
 }
 
 struct KeeperError: Error, CustomStringConvertible {

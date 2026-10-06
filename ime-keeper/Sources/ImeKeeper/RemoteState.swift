@@ -53,13 +53,13 @@ func remoteEditorEvent(tokens: [String: String]) throws -> EditorEvent? {
     return event
 }
 
-func remotePane(_ value: [String: Any]) throws -> Pane {
+func parsePane(_ value: [String: Any]) throws -> Pane {
     guard let pane = value["pane_id"] as? String, let workspace = value["workspace_id"] as? String,
           let tab = value["tab_id"] as? String else { throw KeeperError.message("invalid remote pane identity") }
     return Pane(paneID: pane, workspaceID: workspace, tabID: tab)
 }
 
-func remoteProcesses(_ value: [String: Any]) -> [ForegroundProcess] {
+func parseProcesses(_ value: [String: Any]) -> [ForegroundProcess] {
     let rows = value["foreground_processes"] as? [[String: Any]] ?? []
     return rows.map {
         ForegroundProcess(name: $0["name"] as? String,
@@ -78,7 +78,7 @@ extension SessionState {
     /// the departure pane's preference. Active editors retain their mode policy.
     mutating func acceptRemoteManualSource(pane: Pane, baseline: String?, current: String) -> Bool {
         guard let baseline, baseline != current, editors[pane.paneID]?.lifecycle != .active else { return false }
-        panes[pane.paneID] = PaneMemory(inputSourceID: current, workspaceID: pane.workspaceID, tabID: pane.tabID)
+        panes[pane.paneID] = PaneMemory(current, pane: pane)
         return true
     }
 }
@@ -104,16 +104,14 @@ extension SessionState {
             incoming = EditorEvent(version: event.version, instanceID: event.instanceID, pid: event.pid,
                                    sequence: event.sequence, event: .snapshot, mode: event.mode)
         }
-        return try receiveEditor(incoming, context: EditorContext(session: session, pane: pane),
-                                 expectedSession: session, observedInputSourceID: observed)
+        return try receiveEditor(incoming, session: session, pane: pane, observedInputSourceID: observed)
     }
 
     mutating func releaseRemoteEditor(paneID: String) -> String? {
         guard let editor = editors[paneID] else { return nil }
         let pending = editor.lifecycle == .active || editor.appliedMode != nil
         if pending, let before = editor.beforeInputSourceID {
-            panes[paneID] = PaneMemory(inputSourceID: before, workspaceID: editor.pane.workspaceID,
-                                      tabID: editor.pane.tabID)
+            panes[paneID] = PaneMemory(before, pane: editor.pane)
         }
         if editor.lifecycle != .exited { editors[paneID]?.lifecycle = .suspended }
         // Retain dormant identity and memories for a verified resume, but do
@@ -140,7 +138,7 @@ extension SessionState {
                 desired = editors[pane.paneID]?.beforeInputSourceID ?? desired
             }
             if previous != editors[pane.paneID], let before = editors[pane.paneID]?.beforeInputSourceID {
-                panes[pane.paneID] = PaneMemory(inputSourceID: before, workspaceID: pane.workspaceID, tabID: pane.tabID)
+                panes[pane.paneID] = PaneMemory(before, pane: pane)
             }
         } else {
             if !entering, let observed { editors[pane.paneID]?.rememberEditingSource(observed) }
