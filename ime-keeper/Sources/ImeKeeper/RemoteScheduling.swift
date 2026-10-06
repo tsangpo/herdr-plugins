@@ -32,11 +32,8 @@ struct RemoteEventFilter {
             panes.removeAll()
             return true
         }
-        do { _ = try remoteEditorEvent(tokens: next.tokens) }
-        catch {
-            panes.removeAll()
-            return true
-        }
+        // Invalid editor reports are stable pane state too. Validate during
+        // reconciliation; repeated bad tokens must not evict other panes here.
         let previous = panes.updateValue(next, forKey: next.pane.paneID)
         return previous != next
     }
@@ -67,6 +64,9 @@ struct RemoteMetrics: Codable, Equatable {
     var processQueries = 0
     var currentQueries = 0
     var identityQueries = 0
+    var identityCacheHits = 0
+    var identityQueriesByReason: [String: Int] = [:]
+    var identityQueryTotalMsByReason: [String: Double] = [:]
     var appliedModeEvents = 0
     var lastReconcileMs: Double?
     var lastModeApplyMs: Double?
@@ -90,9 +90,10 @@ struct RemoteIdentityCache {
     private var key: String?
     private var value: (Date, LocalProcessIdentity)?
     mutating func clear() { key = nil; value = nil }
-    mutating func identity(key: String, fresh: Bool, now: Date = Date(),
+    mutating func identity(key: String, now: Date = Date(), onHit: () -> Void = {},
                            lookup: () -> LocalProcessIdentity?) -> LocalProcessIdentity? {
-        if !fresh, self.key == key, let (checked, identity) = value, now.timeIntervalSince(checked) < 1 {
+        if self.key == key, let (checked, identity) = value, now.timeIntervalSince(checked) < 2 {
+            onHit()
             return identity
         }
         self.key = key
@@ -108,4 +109,24 @@ struct RemoteStatusSchedule {
         businessChanged || now.timeIntervalSince(writtenAt) >= 2
     }
     mutating func succeeded(at now: Date) { writtenAt = now }
+}
+
+/// Bad editor metadata affects one pane, never the connection or other memories.
+struct RemoteMetadata {
+    private(set) var errors: [String: String] = [:]
+
+    mutating func parse(tokens: [String: String], paneID: String) -> EditorEvent? {
+        do {
+            let event = try remoteEditorEvent(tokens: tokens)
+            errors.removeValue(forKey: paneID)
+            return event
+        } catch {
+            errors[paneID] = String(describing: error)
+            return nil
+        }
+    }
+
+    mutating func retain(panes: Set<String>) {
+        errors = errors.filter { panes.contains($0.key) }
+    }
 }

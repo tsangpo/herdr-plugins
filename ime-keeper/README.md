@@ -183,9 +183,12 @@ reverse SSH forward, separate mode socket, system service, or 100ms mode polling
 Pane focus retains its 100ms stable window. Relevant events wake the worker
 immediately; identical heartbeats, titles, cwd and unrelated tokens do not trigger
 reconciliation. A separate two-second health schedule detects lost editor
-foreground ownership even during continuous mode changes. Each editor reconcile
+foreground ownership even during continuous mode changes while the registered
+terminal controls input. While another terminal or application is selected, the
+wrapper pauses remote queries but keeps reading subscription events. Returning
+to the terminal triggers a full snapshot and fresh identity verification. Each editor reconcile
 still queries foreground processes and revalidates the focused pane and IME tokens
-before applying. Kernel TUI/core identity is cached for at most one second and
+before applying. Kernel TUI/core identity is cached for at most two seconds and
 refreshed on health checks, focus entry and terminal reacquisition. Both transports share the editor
 policy: command modes use ABC, editing restores the editing source, and
 exit/suspend restores the pre-editor shell source.
@@ -239,12 +242,24 @@ state directory instead of overwriting the interactive terminal. Unchanged sessi
 state is not rewritten. Status changes are written immediately; updates that only
 change metrics are flushed at most once every two seconds.
 
+`metadataErrors` maps pane IDs to malformed or unsupported editor-report errors.
+Such a report releases only that pane's editor policy; it does not reconnect or
+clear other pane memories. Each error clears when a valid report returns, tokens
+expire or the pane closes, on the next reconciliation. Switching input sources
+does not clear metadata errors. Subscription errors such as `events_lost` are
+reported with their code and trigger immediate invalidation and reconnection.
+
 The `metrics` object contains received/ignored event counts, reconcile attempts,
 revision discards, snapshot/process/current/SSH identity query counts, and
 `lastReconcileMs`. `lastModeApplyMs` measures local event receipt through successful
 mode application, including queueing and retries; `appliedModeEvents` counts those
 applications. It does not measure remote keystroke latency or the first Chinese
 character. Counters cover the wrapper lifetime, including auxiliary reconnects.
+`identityCacheHits` counts reused kernel identities. `identityQueriesByReason`
+and `identityQueryTotalMsByReason` split SSH lookup counts and cumulative time
+between `health`, `focus` and `event`; a due health check takes precedence when
+causes overlap. Compare these counters across the same activity interval rather
+than dividing total identity lookups by applied modes.
 
 An optional SSH integration test creates an isolated temporary Herdr server and
 two real Neovim TUIs, checks 30 seconds of idle event filtering, suspend/resume,

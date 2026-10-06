@@ -59,3 +59,22 @@ import Testing
     var frames = JSONLines(limit: 20)
     #expect(throws: Error.self) { try frames.append(Data((String(repeating: "a", count: 21) + "\n").utf8)) }
 }
+
+@Test func subscriptionErrorFrameInvalidatesBeforeEOF() throws {
+    for code in ["events_lost", "permission_denied"] {
+        var frames = JSONLines(limit: 1024)
+        var wire = try JSONSerialization.data(withJSONObject: ["id": "ime-events",
+            "error": ["code": code, "message": "subscription failed"]])
+        wire.append(10)
+        try frames.append(wire)
+        let inbox = RemoteInbox()
+        let revision = inbox.view().revision
+        let frame = try #require(try frames.next())
+        #expect(throws: Error.self) { try inbox.checkSubscriptionFrame(frame) }
+        #expect(inbox.view().revision > revision)
+        #expect(inbox.view().failure?.contains(code) == true)
+        #expect(inbox.view().failure?.contains("subscription failed") == true)
+        // No EOF or second frame is required to invalidate an in-flight switch.
+        #expect(try frames.next() == nil)
+    }
+}

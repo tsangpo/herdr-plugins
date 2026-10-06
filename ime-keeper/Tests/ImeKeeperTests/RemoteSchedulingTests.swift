@@ -48,11 +48,45 @@ private func observationRow() -> [String: Any] {
     var malformed = original
     malformed["tokens"] = ["ime_keeper_mode": "command"]
     #expect(accepts(malformed))
-    #expect(accepts(malformed))
+    #expect(!accepts(malformed))
     #expect(accepts(changed))
     var reconnected = RemoteEventFilter()
     let firstAfterReconnect = reconnected.accepts(kind: "pane_updated", data: ["pane": changed])
     #expect(firstAfterReconnect)
+}
+
+@Test func invalidEditorHeartbeatsDoNotEvictOtherPanesAndTransitionsStillTrigger() throws {
+    var filter = RemoteEventFilter()
+    func accepts(_ row: [String: Any]) -> Bool {
+        filter.accepts(kind: "pane_updated", data: ["pane": row])
+    }
+    let healthy = observationRow()
+    var broken = healthy
+    broken["pane_id"] = "w:p2"
+    broken["terminal_id"] = "other-terminal"
+    broken["focused"] = false
+    let valid = try #require(healthy["tokens"] as? [String: String])
+    var unsupported = valid
+    unsupported["ime_keeper_version"] = "2"
+    broken["tokens"] = unsupported
+    #expect(accepts(healthy))
+    #expect(accepts(broken))
+    for _ in 0..<30 {
+        #expect(!accepts(healthy))
+        #expect(!accepts(broken))
+    }
+
+    // A different invalid report, recovery, and TTL removal each trigger once.
+    for tokens in [["ime_keeper_mode": "command"], valid, [:]] {
+        broken["tokens"] = tokens
+        #expect(accepts(broken))
+        #expect(!accepts(healthy))
+        #expect(!accepts(broken))
+    }
+    // Unusable pane structure still invalidates conservatively.
+    broken.removeValue(forKey: "terminal_id")
+    #expect(accepts(broken))
+    #expect(accepts(healthy))
 }
 
 @Test func remoteWaitCoalescesAndCannotLoseAnEarlyNotification() {
@@ -95,18 +129,19 @@ private func observationRow() -> [String: Any] {
         lookups += 1
         return LocalProcessIdentity(parentPID: 42, executableName: "nvim")
     }
-    _ = cache.identity(key: "pane:instance:pid", fresh: false, now: now, lookup: lookup)
-    _ = cache.identity(key: "pane:instance:pid", fresh: false, now: now.addingTimeInterval(0.9), lookup: lookup)
+    _ = cache.identity(key: "pane:instance:pid", now: now, lookup: lookup)
+    _ = cache.identity(key: "pane:instance:pid", now: now.addingTimeInterval(1.9), lookup: lookup)
     #expect(lookups == 1)
-    _ = cache.identity(key: "pane:instance:pid", fresh: false, now: now.addingTimeInterval(1.1), lookup: lookup)
+    _ = cache.identity(key: "pane:instance:pid", now: now.addingTimeInterval(2), lookup: lookup)
     #expect(lookups == 2)
-    _ = cache.identity(key: "pane:instance:pid", fresh: true, now: now.addingTimeInterval(1.2), lookup: lookup)
-    _ = cache.identity(key: "pane:new-instance:pid", fresh: false, now: now.addingTimeInterval(1.3), lookup: lookup)
+    cache.clear()
+    _ = cache.identity(key: "pane:instance:pid", now: now.addingTimeInterval(2.1), lookup: lookup)
+    _ = cache.identity(key: "pane:new-instance:pid", now: now.addingTimeInterval(2.2), lookup: lookup)
     #expect(lookups == 4)
     cache.clear()
-    let failedLookupIsEmpty = (cache.identity(key: "pane:new-instance:pid", fresh: false, now: now) { nil } == nil)
+    let failedLookupIsEmpty = (cache.identity(key: "pane:new-instance:pid", now: now) { nil } == nil)
     #expect(failedLookupIsEmpty)
-    _ = cache.identity(key: "pane:new-instance:pid", fresh: false, now: now, lookup: lookup)
+    _ = cache.identity(key: "pane:new-instance:pid", now: now, lookup: lookup)
     #expect(lookups == 5)
 }
 

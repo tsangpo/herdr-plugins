@@ -123,8 +123,18 @@ struct HerdrAPI {
     let path: String
     var deadline: Date? = nil
 
+    static func checkError(_ response: [String: Any]) throws {
+        guard let error = response["error"] else { return }
+        if let fields = error as? [String: Any] {
+            let code = fields["code"] as? String ?? "unknown"
+            let message = fields["message"] as? String ?? String(describing: error)
+            throw KeeperError.message("Herdr API [\(code)]: \(message)")
+        }
+        throw KeeperError.message("Herdr API: \(error)")
+    }
+
     static func result(_ response: [String: Any]) throws -> [String: Any] {
-        if let error = response["error"] { throw KeeperError.message("Herdr API: \(error)") }
+        try checkError(response)
         guard let result = response["result"] as? [String: Any] else {
             throw KeeperError.message("Herdr response has no result")
         }

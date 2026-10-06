@@ -76,6 +76,24 @@ final class RemoteInbox {
         modeReceipts.removeValue(forKey: observation.pane.paneID)
         return at
     }
+    func cancelFocusObservation(preserveFocusWindow: Bool = false) {
+        lock.lock(); defer { lock.unlock() }
+        focusSample &+= 1 // Reject callbacks queued before terminal ownership was lost.
+        focusSamplePending = false
+        departure = nil
+        if !preserveFocusWindow { focusAt = .distantPast }
+        modeReceipts.removeAll()
+        identityRevision &+= 1
+        revision &+= 1
+        lock.broadcast()
+    }
+    func checkSubscriptionFrame(_ frame: [String: Any]) throws {
+        do { try HerdrAPI.checkError(frame) }
+        catch {
+            fail(String(describing: error))
+            throw error
+        }
+    }
     func consumed(_ revision: UInt64) {
         lock.lock(); defer { lock.unlock() }
         if self.revision == revision { departure = nil }
@@ -101,6 +119,7 @@ private struct RemoteStatus: Codable, Equatable {
     let state: SessionState
     let error: String?
     let focusError: String?
+    let metadataErrors: [String: String]
     var metrics = RemoteMetrics()
     var processAlive: Bool? = nil
 }
@@ -119,6 +138,8 @@ final class RemoteBridge {
     private var store: Store?
     private var remoteSocket = ""
     private var lastError: String?
+    private var focusError: String?
+    private var metadata = RemoteMetadata()
     private let diagnostics = RemoteDiagnostics()
     private var stateWrites = RemoteWriteCache<SessionState>()
     private var statusWrites = RemoteWriteCache<RemoteStatus>()
@@ -136,7 +157,7 @@ final class RemoteBridge {
         var value = RemoteStatus(target: options.target, session: options.session ?? "default",
             connection: connection, pid: getpid(), socket: remoteSocket,
             ghosttyTerminalID: terminalFocus.surfaceID, state: state,
-            error: lastError, focusError: onMain { terminalFocus.error })
+            error: lastError, focusError: focusError, metadataErrors: metadata.errors)
         let path = directories.state.appendingPathComponent("remote-status.json")
         let now = Date()
         // Business changes flush immediately; counters alone flush at most every two seconds.
@@ -171,6 +192,7 @@ final class RemoteBridge {
                 identityCache.clear()
                 stateWrites = RemoteWriteCache()
                 lastError = nil
+                metadata = RemoteMetadata()
                 let inbox = RemoteInbox()
                 let readerDone = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async {
@@ -179,12 +201,10 @@ final class RemoteBridge {
                         var filter = RemoteEventFilter()
                         while !inbox.view().stopped && !self.stopSignal.stopped {
                             guard let event = try subscription.read(timeout: 0.2) else { continue }
+                            try inbox.checkSubscriptionFrame(event)
                             let kind = (event["event"] as? String ?? "").replacingOccurrences(of: ".", with: "_")
                             let data = event["data"] as? [String: Any] ?? [:]
                             self.diagnostics.update { $0.receivedEvents += 1 }
-                            if kind == "events_lost" || (event["result"] as? [String: Any])?["type"] as? String == "events_lost" {
-                                throw KeeperError.message("Herdr events lost; resubscribing")
-                            }
                             guard filter.accepts(kind: kind, data: data) else {
                                 self.diagnostics.update { $0.ignoredEvents += 1 }
                                 continue
@@ -211,54 +231,27 @@ final class RemoteBridge {
                     shutdown(subscription.fd, SHUT_RDWR)
                     _ = readerDone.wait(timeout: .now() + 1)
                 }
-                var handled: UInt64 = 0
-                var wasFront = false
-                var health = RemoteHealthSchedule()
-                var terminalCheckAt = Date.distantPast
                 retry = 0.5
-                while !stopSignal.stopped {
-                    let now = Date()
-                    var front = wasFront
-                    if now >= terminalCheckAt {
-                        front = onMain { terminalFocus.isSelected() }
-                        terminalCheckAt = Date().addingTimeInterval(0.1)
-                        if front != wasFront {
-                            if !front { state.relinquishInputObservation() }
-                            identityCache.clear()
-                            inbox.invalidate()
+                try RemoteWorker(inbox: inbox, diagnostics: diagnostics,
+                    wait: { inbox.wait(after: $0, until: $1) },
+                    stopped: { self.stopSignal.stopped },
+                    focus: {
+                        let observed = onMain {
+                            RemoteFocusObservation(selected: self.terminalFocus.isSelected(), error: self.terminalFocus.error)
                         }
-                    }
-                    let activated = front && !wasFront
-                    wasFront = front
-                    let view = inbox.view()
-                    if let failure = view.failure { throw KeeperError.message(failure) }
-                    let stableAt = view.focusAt.addingTimeInterval(0.1)
-                    if view.focusSamplePending || Date() < stableAt {
-                        inbox.wait(after: view.revision, until: view.focusSamplePending
-                            ? terminalCheckAt : min(stableAt, terminalCheckAt))
-                        continue
-                    }
-                    let healthDue = health.isDue(at: Date())
-                    if handled != view.revision || activated || healthDue {
-                        let started = Date()
-                        diagnostics.update { $0.reconcileAttempts += 1 }
-                        let completed = try reconcile(api: api, ssh: ssh, inbox: inbox, view: view,
-                                                      front: front, forceIdentity: healthDue || activated)
-                        // Only actual health work advances its deadline. Mode activity cannot postpone it.
-                        if healthDue { health.checked(at: Date()) }
-                        diagnostics.update {
-                            $0.lastReconcileMs = Date().timeIntervalSince(started) * 1000
-                            if !completed && inbox.view().revision != view.revision { $0.revisionDiscards += 1 }
-                        }
-                        if completed {
-                            handled = view.revision
-                            inbox.consumed(view.revision)
-                        }
-                    }
-                    status(front ? "connected" : "paused: remote Ghostty terminal is not focused")
-                    // Retry a rejected candidate on the next terminal tick, or immediately for a new event.
-                    inbox.wait(after: view.revision, until: min(terminalCheckAt, health.deadline))
-                }
+                        self.focusError = observed.error
+                        return observed
+                    },
+                    relinquish: {
+                        self.state.relinquishInputObservation()
+                        self.identityCache.clear()
+                    },
+                    reconcile: { view, reason in
+                        try self.reconcile(api: api, ssh: ssh, inbox: inbox, view: view, reason: reason)
+                    },
+                    status: { observation in
+                        self.status(observation.selected ? "connected" : "paused: remote Ghostty terminal is not focused")
+                    }).run()
             } catch {
                 lastError = String(describing: error)
                 status("disconnected; retrying")
@@ -272,7 +265,7 @@ final class RemoteBridge {
     }
 
     private func reconcile(api: HerdrAPI, ssh: RemoteSSH, inbox: RemoteInbox,
-                           view: RemoteInbox.View, front: Bool, forceIdentity: Bool) throws -> Bool {
+                           view: RemoteInbox.View, reason: RemoteQueryReason) throws -> Bool {
         guard let store else { return false }
         diagnostics.update { $0.snapshotQueries += 1 }
         let result = try api.request("session.snapshot")
@@ -285,28 +278,33 @@ final class RemoteBridge {
         let ownership = InputOwner(directory: store.directory)
         if !ownership.isCurrent(store.key) { candidate.relinquishInputObservation() }
         var terminals: [String: Pane] = [:]
-        let parsed = try rows.map { (row: $0, pane: try parsePane($0)) }
-        for (row, pane) in parsed {
+        let parsed = try rows.map { row in
+            let pane = try parsePane(row)
+            return (row: row, pane: pane,
+                    event: metadata.parse(tokens: row["tokens"] as? [String: String] ?? [:], paneID: pane.paneID))
+        }
+        for (row, pane, _) in parsed {
             if let terminal = row["terminal_id"] as? String {
                 terminals[terminal] = pane
                 if let old = terminalPanes[terminal], old != pane { candidate.movePane(from: old.paneID, to: pane) }
             }
         }
         let ids = Set(parsed.map { $0.pane.paneID })
+        metadata.retain(panes: ids)
         for id in Set(candidate.panes.keys).union(candidate.editors.keys) where !ids.contains(id) { candidate.closePane(id) }
         let focused = parsed.first { $0.pane.paneID == focusedID }
         let focusedRow = focused?.row
         let pane = focused?.pane
         let entering = candidate.currentPane?.paneID != focusedID
-        let observed: String? = try onMain { front && terminalFocus.isSelected(fresh: true) ? try currentInputSourceID() : nil }
+        let observed: String? = try onMain { terminalFocus.isSelected(fresh: true) ? try currentInputSourceID() : nil }
         if entering, let source = view.departure ?? observed {
             // A focus event can still arrive after another app became active.
-            if front { candidate.rememberLeavingPane(currentInputSourceID: source) }
+            if observed != nil { candidate.rememberLeavingPane(currentInputSourceID: source) }
         }
         let session = EditorSession(sourceID: "ssh:" + options.target, sessionID: store.key)
         // Background panes update mode caches without sampling the global IME.
-        for (row, background) in parsed where background.paneID != focusedID {
-            if let event = try? remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:]) {
+        for (_, background, event) in parsed where background.paneID != focusedID {
+            if let event {
                 _ = try candidate.receiveRemoteEditor(event, pane: background, session: session, observed: nil)
             } else { _ = candidate.releaseRemoteEditor(paneID: background.paneID) }
         }
@@ -319,8 +317,12 @@ final class RemoteBridge {
             return true
         }
         let config = try loadConfiguration(directory: directories.config)
-        let event = try remoteEditorEvent(tokens: row["tokens"] as? [String: String] ?? [:])
-        if forceIdentity || entering || event == nil || identityRevision != view.identityRevision
+        guard let observation = RemotePaneObservation(row) else {
+            throw KeeperError.message("invalid remote pane observation")
+        }
+        let event = focused?.event
+        let queryReason: RemoteQueryReason = reason == .health ? .health : entering ? .focus : reason
+        if reason != .event || entering || event == nil || identityRevision != view.identityRevision
             || event?.event == .exit || event?.event == .suspend {
             identityCache.clear()
         }
@@ -340,9 +342,18 @@ final class RemoteBridge {
         var valid = false
         if let event {
             valid = editorIsForeground(pid: event.pid, processes: processes) { pid in
-                let key = "\(pane.workspaceID):\(pane.tabID):\(pane.paneID):\(row["terminal_id"] ?? ""):\(event.instanceID):\(pid)"
-                return self.identityCache.identity(key: key, fresh: false) {
-                    self.diagnostics.update { $0.identityQueries += 1 }
+                let key = "\(pane.workspaceID):\(pane.tabID):\(pane.paneID):\(observation.terminalID):\(event.instanceID):\(pid)"
+                return self.identityCache.identity(key: key, onHit: {
+                    self.diagnostics.update { $0.identityCacheHits += 1 }
+                }) {
+                    let started = Date()
+                    defer {
+                        self.diagnostics.update {
+                            $0.identityQueries += 1
+                            $0.identityQueriesByReason[queryReason.rawValue, default: 0] += 1
+                            $0.identityQueryTotalMsByReason[queryReason.rawValue, default: 0] += Date().timeIntervalSince(started) * 1000
+                        }
+                    }
                     return ssh.identity(pid: pid)
                 }
             }
@@ -360,12 +371,10 @@ final class RemoteBridge {
         let currentResult = try api.request("pane.current")
         guard let current = currentResult["pane"] as? [String: Any],
               current["pane_id"] as? String == pane.paneID,
-              let observation = RemotePaneObservation(row),
               RemotePaneObservation(current) == observation,
               inbox.view().revision == view.revision, inbox.view().failure == nil else { return false }
         let applied = try onMain { () -> Bool in
             guard !self.stopSignal.stopped, inbox.view().revision == view.revision else { return false }
-            guard front else { return true }
             return try FileLock.with(path: store.switchLockPath) {
                 guard self.terminalFocus.isSelected(fresh: true) else { return false }
                 // The lock and AppleScript query can both wait. A focus event may
