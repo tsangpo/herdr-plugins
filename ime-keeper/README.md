@@ -105,6 +105,15 @@ ordering information until the pane closes. Existing pane rules and state files
 remain compatible. Disable other automatic IME-switching Neovim plugins to avoid
 two integrations selecting different sources.
 
+## Updating
+
+Update a GitHub install with `herdr plugin update tsangpo.ime-keeper` (Herdr
+0.9.4+; on older versions reinstall). Running commands keep their old files and
+new invocations use the new installation. Restart Neovim and any running
+`ime-keeper remote` wrapper to pick up the new version; an open Neovim
+re-resolves the executable if its old path was removed. Locally linked plugins
+are not touched by `plugin update`.
+
 ## Remote Neovim / LazyVim
 
 Fish users can use the bundled [ime-remote function](fish/ime-remote.fish)
@@ -142,7 +151,11 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Keep the PATH addition in your shell configuration. If the link already exists,
-inspect its target before replacing it. This entry uses the same configuration
+inspect its target before replacing it. For GitHub installs, Herdr 0.9.4+
+places each `herdr plugin update` in a new installation directory and later
+removes the old one, so a link made here goes stale; use the `ime-remote` fish
+function (or a wrapper that reads `plugin_root` on every run) instead, and
+re-create the link after each update. This entry uses the same configuration
 and state directories as the Herdr plugin without requiring a running local
 Herdr server or manually exported plugin variables.
 

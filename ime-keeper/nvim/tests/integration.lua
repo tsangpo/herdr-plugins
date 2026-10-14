@@ -129,6 +129,31 @@ assert(not pcall(adapter.connect, {}), "missing plugin must not initialize")
 entries = {{ plugin_id = "tsangpo.ime-keeper", enabled = true, plugin_root = "/tmp/plugin with spaces" }}
 vim.fn.executable = function() return 0 end
 assert(not pcall(adapter.connect, {}), "missing binary must not initialize")
+-- `herdr plugin update` moves plugin_root; a vanished executable is re-resolved.
+local old_root = "/tmp/old gen"
+local new_root = "/tmp/new gen"
+entries = {{ plugin_id = "tsangpo.ime-keeper", enabled = true, plugin_root = old_root }}
+vim.fn.executable = function(path) return vim.startswith(path, entries[1].plugin_root) and 1 or 0 end
+calls = {}
+vim.system = function(argv, opts)
+  table.insert(calls, { argv = argv, opts = opts })
+  return { wait = function()
+    if argv[2] == "plugin" then
+      return { code = 0, stdout = vim.json.encode({ result = { plugins = entries } }) }
+    end
+    return { code = 0, stdout = "" }
+  end }
+end
+local moved = adapter.connect({})
+local gone = vim.fn.executable
+vim.fn.executable = function(path) return vim.startswith(path, new_root) and 1 or 0 end
+entries[1].plugin_root = new_root
+moved({ event = "mode", mode = "edit" })
+assert(calls[#calls].argv[1] == new_root .. "/.build/release/ime-keeper", "must re-resolve moved plugin root")
+local before = #calls
+moved({ event = "mode", mode = "edit" })
+assert(#calls == before + 1, "re-resolution must not repeat while the path is valid")
+vim.fn.executable = gone
 vim.system = function() return { wait = function() return { code = 124, stderr = "timeout" } end } end
 assert(not pcall(reporter, { event = "mode" }), "transport failures must propagate")
 vim.system, vim.fn.executable = original_system, original_executable
