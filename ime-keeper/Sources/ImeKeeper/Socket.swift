@@ -24,9 +24,9 @@ struct JSONLines {
     }
 }
 
-final class JSONSocket {
+/// Non-blocking Unix stream socket with deadline-bounded I/O. Framing belongs to callers.
+final class UnixSocket {
     let fd: Int32
-    private var lines = JSONLines(limit: 8 * 1024 * 1024)
 
     init(path: String, deadline: Date = Date().addingTimeInterval(2)) throws {
         var address = sockaddr_un()
@@ -79,9 +79,7 @@ final class JSONSocket {
         }
     }
 
-    func send(_ value: [String: Any], deadline: Date = Date().addingTimeInterval(2)) throws {
-        var data = try JSONSerialization.data(withJSONObject: value)
-        data.append(10)
+    func write(_ data: Data, deadline: Date) throws {
         try data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
@@ -96,6 +94,35 @@ final class JSONSocket {
         }
     }
 
+    /// Returns available bytes; nil is a timeout, not a disconnect.
+    func readAvailable(until deadline: Date) throws -> Data? {
+        while Date() < deadline {
+            guard try Self.ready(fd, Int16(POLLIN), until: deadline) else { return nil }
+            var buffer = [UInt8](repeating: 0, count: 16384)
+            let count = Darwin.read(fd, &buffer, buffer.count)
+            if count < 0 && (errno == EAGAIN || errno == EINTR) { continue }
+            guard count > 0 else { throw KeeperError.message("socket disconnected") }
+            return Data(buffer.prefix(count))
+        }
+        return nil
+    }
+}
+
+final class JSONSocket {
+    private let socket: UnixSocket
+    var fd: Int32 { socket.fd }
+    private var lines = JSONLines(limit: 8 * 1024 * 1024)
+
+    init(path: String, deadline: Date = Date().addingTimeInterval(2)) throws {
+        socket = try UnixSocket(path: path, deadline: deadline)
+    }
+
+    func send(_ value: [String: Any], deadline: Date = Date().addingTimeInterval(2)) throws {
+        var data = try JSONSerialization.data(withJSONObject: value)
+        data.append(10)
+        try socket.write(data, deadline: deadline)
+    }
+
     /// nil is an idle timeout, not a disconnect.
     func read(timeout: TimeInterval = 2) throws -> [String: Any]? {
         try read(until: Date().addingTimeInterval(timeout))
@@ -104,15 +131,8 @@ final class JSONSocket {
     func read(until deadline: Date) throws -> [String: Any]? {
         while Date() < deadline {
             if let line = try lines.next() { return line }
-            guard try Self.ready(fd, Int16(POLLIN), until: deadline) else { return nil }
-            var buffer = [UInt8](repeating: 0, count: 16384)
-            let count = Darwin.read(fd, &buffer, buffer.count)
-            if count < 0 && (errno == EAGAIN || errno == EINTR) {
-                if Date() >= deadline { return nil }
-                continue
-            }
-            guard count > 0 else { throw KeeperError.message("socket disconnected") }
-            try lines.append(Data(buffer.prefix(count)))
+            guard let data = try socket.readAvailable(until: deadline) else { return nil }
+            try lines.append(data)
             if Date() >= deadline, !lines.buffer.contains(10) { return nil }
         }
         return nil

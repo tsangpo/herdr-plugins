@@ -115,7 +115,8 @@ private struct RemoteStatus: Codable, Equatable {
     let connection: String
     let pid: Int32
     let socket: String
-    let ghosttyTerminalID: String
+    let terminal: TerminalApp
+    let terminalID: String
     let state: SessionState
     let error: String?
     let focusError: String?
@@ -156,7 +157,7 @@ final class RemoteBridge {
     private func status(_ connection: String) {
         var value = RemoteStatus(target: options.target, session: options.session ?? "default",
             connection: connection, pid: getpid(), socket: remoteSocket,
-            ghosttyTerminalID: terminalFocus.surfaceID, state: state,
+            terminal: terminalFocus.terminal.app, terminalID: terminalFocus.surfaceID, state: state,
             error: lastError, focusError: focusError, metadataErrors: metadata.errors)
         let path = directories.state.appendingPathComponent("remote-status.json")
         let now = Date()
@@ -250,7 +251,7 @@ final class RemoteBridge {
                         try self.reconcile(api: api, ssh: ssh, inbox: inbox, view: view, reason: reason)
                     },
                     status: { observation in
-                        self.status(observation.selected ? "connected" : "paused: remote Ghostty terminal is not focused")
+                        self.status(observation.selected ? "connected" : "paused: remote terminal is not focused")
                     }).run()
             } catch {
                 lastError = String(describing: error)
@@ -431,15 +432,20 @@ func remoteStatus() throws {
 func runRemote(arguments: [String]) throws {
     let options = try RemoteOptions(arguments: arguments)
     guard environment["HERDR_PANE_ID"] == nil else {
-        throw KeeperError.message("start ime-keeper remote from a Ghostty shell outside local Herdr")
+        throw KeeperError.message("start ime-keeper remote from a Ghostty or kitty shell outside local Herdr")
     }
     guard isatty(STDIN_FILENO) == 1 else { throw KeeperError.message("remote requires an interactive terminal") }
     let directories = PluginDirectories(environment: environment)
     try FileManager.default.createDirectory(at: directories.state, withIntermediateDirectories: true)
-    guard let surfaceID = try focusedGhosttySurface() else {
-        throw KeeperError.message("start remote from the selected Ghostty terminal; its surface ID could not be determined")
+    let host = try TerminalTarget.current(environment)
+    let name = host.app.displayName
+    guard let surfaceID = try host.focusedSurface() else {
+        throw KeeperError.message("start remote from the selected \(name) terminal; its surface ID could not be determined")
     }
-    let registration = try RemoteRegistration(directory: directories.state, surfaceID: surfaceID)
+    if host.app == .kitty, surfaceID != environment["KITTY_WINDOW_ID"] {
+        throw KeeperError.message("start remote from the selected kitty window; the focused window is not this shell")
+    }
+    let registration = try RemoteRegistration(directory: directories.state, surfaceID: surfaceID, terminal: host)
     defer { withExtendedLifetime(registration) {} }
     _ = try loadConfiguration(directory: directories.config)
     let client = Process()
@@ -451,7 +457,7 @@ func runRemote(arguments: [String]) throws {
     var clientEnv = environment
     clientEnv.removeValue(forKey: "HERDR_SOCKET_PATH")
     client.environment = clientEnv
-    let bridge = RemoteBridge(options: options, directories: directories, terminalFocus: RemoteTerminalFocus(surfaceID: surfaceID))
+    let bridge = RemoteBridge(options: options, directories: directories, terminalFocus: RemoteTerminalFocus(surfaceID: surfaceID, terminal: host))
     var terminal = termios()
     let hasTerminal = tcgetattr(STDIN_FILENO, &terminal) == 0
     let group = tcgetpgrp(STDIN_FILENO)

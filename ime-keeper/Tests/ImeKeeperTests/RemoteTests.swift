@@ -224,6 +224,56 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     #expect(try localInputAllowed(store: store, query: { "remote-tab" }))
 }
 
+@Test func legacyRegistrationDecodesAsGhosttyAndKittyRoundTrips() throws {
+    let token = UUID()
+    let legacy = Data(#"{"pid":1,"surfaceID":"s","token":"\#(token.uuidString)"}"#.utf8)
+    #expect(try JSONDecoder().decode(RemoteRegistration.Record.self, from: legacy).terminal == .ghostty)
+    let kitty = RemoteRegistration.Record(pid: 1, surfaceID: "7", token: token,
+                                          terminal: TerminalTarget(app: .kitty, listenOn: "unix:/tmp/kitty-1"))
+    #expect(try JSONDecoder().decode(RemoteRegistration.Record.self, from: JSONEncoder().encode(kitty)) == kitty)
+}
+
+@Test func terminalTargetFollowsTheHostEnvironment() throws {
+    #expect(try TerminalTarget.current([:]) == .ghostty)
+    #expect(try TerminalTarget.current(["TERM_PROGRAM": "ghostty", "KITTY_WINDOW_ID": "3"]) == .ghostty)
+    #expect(try TerminalTarget.current(["KITTY_WINDOW_ID": "3", "KITTY_LISTEN_ON": "unix:/tmp/kitty-9"])
+            == TerminalTarget(app: .kitty, listenOn: "unix:/tmp/kitty-9"))
+    #expect(throws: Error.self) { try TerminalTarget.current(["KITTY_WINDOW_ID": "3"]) }
+}
+
+@Test func kittyFramingAndFocusedWindow() throws {
+    func frame(_ value: [String: Any]) throws -> Data {
+        Data("\u{1b}P@kitty-cmd".utf8) + (try JSONSerialization.data(withJSONObject: value)) + Data("\u{1b}\\".utf8)
+    }
+    func tree(os: Bool, tab: Bool, window: Bool) throws -> [String: Any] {
+        let windows: [[String: Any]] = [["id": 1, "is_focused": false], ["id": 5, "is_focused": window]]
+        let osWindows: [[String: Any]] = [["is_focused": os, "tabs": [["is_focused": tab, "windows": windows]]]]
+        return ["ok": true, "data": String(decoding: try JSONSerialization.data(withJSONObject: osWindows), as: UTF8.self)]
+    }
+    let request = try kittyCommand("ls")
+    #expect(request.starts(with: Data("\u{1b}P@kitty-cmd{".utf8)) && request.suffix(2) == Data("\u{1b}\\".utf8))
+    let complete = try frame(tree(os: true, tab: true, window: true))
+    #expect(try kittyResponse(complete.prefix(complete.count - 1)) == nil)
+    #expect(try kittyFocusedWindow(#require(try kittyResponse(complete))) == "5")
+    for (os, tab, window) in [(false, true, true), (true, false, true), (true, true, false)] {
+        #expect(try kittyFocusedWindow(tree(os: os, tab: tab, window: window)) == nil)
+    }
+    #expect(throws: Error.self) { try kittyResponse(frame(["ok": false, "error": "Remote control is disabled"])) }
+    #expect(throws: Error.self) { try kittyFocusedWindow(["ok": true]) }
+}
+
+@Test func kittyRegistrationControlsLocalHooks() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try Store(directory: directory, key: "test")
+    let kitty = TerminalTarget(app: .kitty, listenOn: "unix:/tmp/kitty-1")
+    let registration = try RemoteRegistration(directory: directory, surfaceID: "7", terminal: kitty)
+    #expect(try RemoteRegistration.active(in: directory)?.terminal == kitty)
+    #expect(try localInputAllowed(store: store, query: { "8" }))
+    #expect(try !localInputAllowed(store: store, query: { "7" }))
+    withExtendedLifetime(registration) {}
+}
+
 @Test func ownershipHandoffCannotSampleAnotherTerminalsInput() throws {
     let pane = Pane(paneID: "p", workspaceID: "w", tabID: "t")
     let session = EditorSession(sourceID: "local", sessionID: "s")

@@ -126,7 +126,7 @@ source "$ime_root/fish/ime-remote.fish"
 funcsave ime-remote
 ```
 
-Then, from a **Ghostty shell outside local Herdr**:
+Then, from a **Ghostty or kitty shell outside local Herdr**:
 
 ```fish
 ime-remote ubuntu
@@ -159,7 +159,7 @@ re-create the link after each update. This entry uses the same configuration
 and state directories as the Herdr plugin without requiring a running local
 Herdr server or manually exported plugin variables.
 
-Start from a **Ghostty shell outside local Herdr**:
+Start from a **Ghostty or kitty shell outside local Herdr**:
 
 ```sh
 ime-keeper remote ubuntu
@@ -223,20 +223,32 @@ capacity errors are shown in Lua status and never evict another plugin's tokens.
 | `event` | `start`, `mode`, `snapshot`, `suspend`, `resume`, `exit` |
 | `mode` | `edit` or `command` |
 
-The wrapper records the selected Ghostty terminal when it starts and pauses
-input-source control when another tab or split is selected, Ghostty is not
-frontmost, or the auxiliary connection fails. Terminal detection uses Ghostty's
-AppleScript interface (tested with Ghostty 1.3.1); allow macOS Automation access
-if prompted. If terminal detection fails, input-source control pauses. On reconnect it resubscribes and reads a fresh
+The wrapper records the selected terminal (Ghostty surface or kitty window)
+when it starts and pauses input-source control when another tab or split is
+selected, the terminal app is not frontmost, or the auxiliary connection fails.
+Ghostty detection uses its AppleScript interface (tested with Ghostty 1.3.1);
+allow macOS Automation access if prompted. kitty detection uses kitty's remote
+control socket (tested with kitty 0.49.2), which must be enabled in
+`kitty.conf` before kitty starts:
+
+```conf
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty
+```
+
+The wrapper is detected as running in kitty from `KITTY_WINDOW_ID` and
+`KITTY_LISTEN_ON` (kitty appends its PID to the socket path); it refuses to
+start if remote control is not configured. Only the kitty instance that hosts
+the wrapper is queried. If terminal detection fails, input-source control pauses. On reconnect it resubscribes and reads a fresh
 snapshot. Because Herdr exposes no stable server incarnation identifier, it
 conservatively starts fresh pane/editor memories on each auxiliary reconnect;
 mode reporting resumes from current metadata. Closing the wrapper stops only
 its own client and helper, leaving the remote Herdr server running.
 
-Scope: one remote Ghostty terminal, one wrapper, one
+Scope: one remote Ghostty or kitty terminal, one wrapper, one
 interactive client per remote session, and one participating editor per pane.
 Multiple editors in different panes are supported. Nested local Herdr launches
-are rejected. Local Herdr can remain open in other Ghostty tabs or windows:
+are rejected. Local Herdr can remain open in other tabs or windows of the same terminal:
 local hooks run when the remote terminal is not selected, and the remote
 wrapper controls input only while its terminal is selected. The global switch
 lock is held only during input-source operations.
@@ -247,7 +259,7 @@ lock is held only during input-source operations.
 ime-keeper remote-status
 ```
 
-Status includes the wrapper PID, registered Ghostty terminal ID, connection
+Status includes the wrapper PID, registered terminal app and ID, connection
 state, terminal detection errors, last error, remote socket,
 pane memories and editor modes. It remains available after exit and reports
 whether the recorded process is alive. Diagnostics are written to the plugin
@@ -295,7 +307,7 @@ acknowledged by Herdr; acknowledgement does not mean macOS has already switched.
 For desktop acceptance, select Pinyin in Insert, leave with Esc and Ctrl-C,
 open which-key in Normal, then re-enter Insert and immediately type Chinese.
 Repeat across two Neovims and a shell pane, including manual source changes,
-Ctrl-O, Replace, suspend/resume, exit, pane moves, and switching away from Ghostty.
+Ctrl-O, Replace, suspend/resume, exit, pane moves, and switching away from the terminal.
 Verify actual characters/candidates, not only the menu-bar indicator. Network and
 macOS activation latency mean first-character behavior needs this manual check.
 

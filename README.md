@@ -28,4 +28,4 @@ return {
 Run `:Lazy sync` to install; update with `:Lazy update ime-keeper`. No manual
 copy or Swift build is needed for the Lua integration on the remote host.
 Inside remote Herdr panes, run `nvim` to report modes automatically (`NVIM_IME=0 nvim` disables reporting); on the Mac,
-connect from a Ghostty shell using `ime-keeper remote <ssh-target>`.
+connect from a Ghostty or kitty shell using `ime-keeper remote <ssh-target>`.
