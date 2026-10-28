@@ -21,7 +21,9 @@ final class RemoteSSH {
 
     func command(_ command: String, multiplex: Bool = true) throws -> Data {
         var args = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
-        if multiplex { args += ["-S", control, "-o", "ControlMaster=no"] }
+        // Never request the user's configured forwards; the interactive client owns them.
+        if multiplex { args = ["-F", "/dev/null", "-S", control, "-o", "ControlMaster=no"] + args }
+        else { args += ["-o", "ClearAllForwardings=yes"] }
         args += ["--", options.target, command]
         return try runCommand(executable: "/usr/bin/ssh", arguments: args, environment: environment, timeout: 8)
     }
@@ -43,10 +45,13 @@ final class RemoteSSH {
         for path in [localSocket, control] { try? FileManager.default.removeItem(atPath: path) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        // ClearAllForwardings also drops command-line forwards, so the API socket is
+        // added through the master afterwards. Otherwise a configured RemoteForward
+        // already held by the interactive client fails this connection.
         process.arguments = ["-N", "-T", "-M", "-S", control, "-o", "BatchMode=yes",
             "-o", "ControlPersist=no", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=5",
             "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-            "-L", localSocket + ":" + socket, "--", options.target]
+            "-o", "ClearAllForwardings=yes", "--", options.target]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         let errorPath = directory.appendingPathComponent("ssh.log")
@@ -55,14 +60,22 @@ final class RemoteSSH {
         try process.run()
         tunnel = process
         let deadline = Date().addingTimeInterval(6)
-        while !FileManager.default.fileExists(atPath: localSocket) {
-            guard process.isRunning, Date() < deadline else {
-                let message = (try? String(contentsOf: errorPath, encoding: .utf8)) ?? "SSH forwarding timed out"
-                stop()
-                throw KeeperError.message(message)
+        func wait(for path: String) throws {
+            while !FileManager.default.fileExists(atPath: path) {
+                guard process.isRunning, Date() < deadline else {
+                    let message = (try? String(contentsOf: errorPath, encoding: .utf8)) ?? "SSH forwarding timed out"
+                    stop()
+                    throw KeeperError.message(message.isEmpty ? "SSH forwarding timed out" : message)
+                }
+                Thread.sleep(forTimeInterval: 0.02)
             }
-            Thread.sleep(forTimeInterval: 0.02)
         }
+        try wait(for: control)
+        do {
+            _ = try runCommand(executable: "/usr/bin/ssh", arguments: ["-F", "/dev/null", "-S", control,
+                "-O", "forward", "-L", localSocket + ":" + socket, "--", options.target], environment: environment, timeout: 5)
+        } catch { stop(); throw error }
+        try wait(for: localSocket)
     }
 
     func identity(pid: Int32) -> LocalProcessIdentity? {
