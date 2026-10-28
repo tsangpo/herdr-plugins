@@ -195,8 +195,12 @@ final class RemoteRegistration {
     }
 }
 
-func localInputAllowed(store: Store, query: (() throws -> String?)? = nil) throws -> Bool {
+func localInputAllowed(store: Store, query: (() throws -> String?)? = nil,
+                       frontmost: () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) throws -> Bool {
     guard let remote = try RemoteRegistration.active(in: store.directory) else { return true }
+    // The remote surface cannot be selected while its app is in the background,
+    // e.g. local Herdr in kitty and the remote wrapper in Ghostty.
+    guard frontmost() == remote.terminal.app.bundleIdentifier else { return true }
     let focused = try (query ?? remote.terminal.focusedSurface)()
     return terminalCanControl(remoteSurface: remote.surfaceID, focusedSurface: focused, remote: false)
 }

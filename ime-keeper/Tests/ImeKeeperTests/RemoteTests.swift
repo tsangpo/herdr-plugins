@@ -104,9 +104,12 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try Store(directory: directory, key: "test")
     var registration: RemoteRegistration? = try RemoteRegistration(directory: directory, surfaceID: "remote-tab")
-    #expect(try localInputAllowed(store: store, query: { "local-tab" }))
-    #expect(try !localInputAllowed(store: store, query: { "remote-tab" }))
-    #expect(try !localInputAllowed(store: store, query: { nil }))
+    let ghostty = { TerminalApp.ghostty.bundleIdentifier }
+    #expect(try localInputAllowed(store: store, query: { "local-tab" }, frontmost: ghostty))
+    #expect(try !localInputAllowed(store: store, query: { "remote-tab" }, frontmost: ghostty))
+    #expect(try !localInputAllowed(store: store, query: { nil }, frontmost: ghostty))
+    // Local Herdr in another terminal app controls input while Ghostty is in the background.
+    #expect(try localInputAllowed(store: store, query: { nil }, frontmost: { TerminalApp.kitty.bundleIdentifier }))
     #expect(throws: Error.self) { try RemoteRegistration(directory: directory, surfaceID: "other-tab") }
     withExtendedLifetime(registration) {}
     registration = nil
@@ -269,8 +272,10 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     let kitty = TerminalTarget(app: .kitty, listenOn: "unix:/tmp/kitty-1")
     let registration = try RemoteRegistration(directory: directory, surfaceID: "7", terminal: kitty)
     #expect(try RemoteRegistration.active(in: directory)?.terminal == kitty)
-    #expect(try localInputAllowed(store: store, query: { "8" }))
-    #expect(try !localInputAllowed(store: store, query: { "7" }))
+    let front = { TerminalApp.kitty.bundleIdentifier }
+    #expect(try localInputAllowed(store: store, query: { "8" }, frontmost: front))
+    #expect(try !localInputAllowed(store: store, query: { "7" }, frontmost: front))
+    #expect(try localInputAllowed(store: store, query: { "7" }, frontmost: { TerminalApp.ghostty.bundleIdentifier }))
     withExtendedLifetime(registration) {}
 }
 
