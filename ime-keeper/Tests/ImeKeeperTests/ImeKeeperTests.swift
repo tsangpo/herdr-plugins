@@ -63,10 +63,12 @@ import Testing
     #expect(throws: (any Error).self) { try Configuration.decode(unsupported) }
 }
 
-@Test func exitInputSourceIsOptionalAndSkippedInState() throws {
-    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[]}"#.utf8)).exitInputSourceID == nil)
-    let config = try Configuration.decode(Data(#"{"version":1,"rules":[],"exitInputSourceID":"ABC"}"#.utf8))
-    #expect(config.exitInputSourceID == "ABC")
+@Test func exitABCIsDefaultAndSkippedInState() throws {
+    let abc = EditorMemory.commandInputSourceID
+    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[]}"#.utf8)).exitInputSourceID == abc)
+    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[],"disableExitABC":false}"#.utf8)).exitInputSourceID == abc)
+    let config = try Configuration.decode(Data(#"{"version":1,"rules":[],"disableExitABC":true}"#.utf8))
+    #expect(config.exitInputSourceID == nil)
     var state = SessionState.empty
     state.exitInputSourceID = "ABC"
     let decoded = try JSONDecoder().decode(SessionState.self, from: encodedJSON(state))

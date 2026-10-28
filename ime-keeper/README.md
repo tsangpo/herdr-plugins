@@ -26,13 +26,14 @@ Edit `config.json` to set first-focus defaults. Rules are case-sensitive, evalua
 }
 ```
 
-Set the optional `exitInputSourceID` to select a source whenever a TUI returns to
-the shell: Neovim exit or suspend, and Herdr-detected agents such as `claude`,
-`codex` or `opencode` exiting. That source also becomes the pane's memory. Without it,
-Neovim restores the source from before it started and agent exits change nothing.
+Whenever a TUI returns to the shell, IME Keeper selects ABC and remembers it for
+the pane. This covers Neovim exit or suspend, and Herdr-detected agents such as
+`claude`, `codex` or `opencode` exiting. Set `disableExitABC` to `true` to turn this
+off: Neovim then restores the source from before it started, and agent exits
+change nothing.
 
 ```json
-{ "version": 1, "exitInputSourceID": "com.apple.keylayout.ABC", "rules": [] }
+{ "version": 1, "disableExitABC": true, "rules": [] }
 ```
 
 Use the `list-input-sources` action to discover selectable source IDs. Runtime state is stored per `HERDR_SOCKET_PATH` in Herdr's plugin state directory.
@@ -85,7 +86,7 @@ Directly adding `ime-keeper/nvim` to runtimepath also remains supported.
 | Normal / Visual / Select / command line / terminal modes | ABC |
 | Manually change the source while editing | Remember it when leaving editing or the pane |
 | Return to the pane | Apply its editor mode and editing memory |
-| Exit or suspend Neovim | `exitInputSourceID` if set, otherwise the source from before entering the editor |
+| Exit or suspend Neovim | ABC (with `disableExitABC`, the source from before entering the editor) |
 | Resume Neovim | Save the shell source for the next return; retain editing memory |
 
 `Ctrl-C` and `Ctrl-O` are handled through `ModeChanged`. The integration does not

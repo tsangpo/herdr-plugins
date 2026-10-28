@@ -8,9 +8,13 @@ struct Rule: Codable, Equatable {
 struct Configuration: Codable, Equatable {
     let version: Int
     let rules: [Rule]
-    /// Selected when an editor or agent TUI returns to the shell; nil restores
-    /// the editor's pre-editor source and leaves agent exits unchanged.
-    var exitInputSourceID: String? = nil
+    /// ABC is selected when an editor or agent TUI returns to the shell. When
+    /// disabled, Neovim restores its pre-editor source and agent exits are ignored.
+    var disableExitABC: Bool? = nil
+
+    var exitInputSourceID: String? {
+        disableExitABC == true ? nil : EditorMemory.commandInputSourceID
+    }
 
     static func decode(_ data: Data) throws -> Configuration {
         let value = try JSONDecoder().decode(Configuration.self, from: data)
