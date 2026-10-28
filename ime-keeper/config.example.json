@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "exitInputSourceID": "com.apple.keylayout.ABC",
   "rules": [
     {
       "command": "codex",

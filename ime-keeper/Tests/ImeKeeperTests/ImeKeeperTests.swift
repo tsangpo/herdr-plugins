@@ -62,3 +62,13 @@ import Testing
     let unsupported = Data(#"{"version":2,"rules":[]}"#.utf8)
     #expect(throws: (any Error).self) { try Configuration.decode(unsupported) }
 }
+
+@Test func exitInputSourceIsOptionalAndSkippedInState() throws {
+    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[]}"#.utf8)).exitInputSourceID == nil)
+    let config = try Configuration.decode(Data(#"{"version":1,"rules":[],"exitInputSourceID":"ABC"}"#.utf8))
+    #expect(config.exitInputSourceID == "ABC")
+    var state = SessionState.empty
+    state.exitInputSourceID = "ABC"
+    let decoded = try JSONDecoder().decode(SessionState.self, from: encodedJSON(state))
+    #expect(decoded.exitInputSourceID == nil)
+}

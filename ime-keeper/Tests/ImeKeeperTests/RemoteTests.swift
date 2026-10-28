@@ -378,3 +378,24 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
         entering: false, observed: "manual-pinyin", ordinaryTarget: nil) == "shell")
     #expect(state.editors[pane.paneID]?.editingInputSourceID == "manual-pinyin")
 }
+
+@Test func remoteReleaseAndAgentExitUseConfiguredExitSource() throws {
+    let a = Pane(paneID: "w:p1", workspaceID: "w", tabID: "t")
+    let session = EditorSession(sourceID: "ssh:host", sessionID: "s")
+    let abc = EditorMemory.commandInputSourceID
+    var state = SessionState.empty
+    state.exitInputSourceID = abc
+    let start = try #require(try remoteEditorEvent(tokens: tokens(mode: "edit")))
+    #expect(try state.receiveRemoteEditor(start, pane: a, session: session, observed: "pinyin") == "pinyin")
+    state.editorSwitchSucceeded(paneID: a.paneID)
+    #expect(state.releaseRemoteEditor(paneID: a.paneID) == abc)
+    #expect(state.panes[a.paneID]?.inputSourceID == abc)
+    #expect(state.editors[a.paneID]?.beforeInputSourceID == "pinyin")
+
+    let inbox = RemoteInbox()
+    inbox.releaseAgent(paneID: a.paneID)
+    let view = inbox.view()
+    inbox.releaseAgent(paneID: "w:p2")
+    inbox.consumeAgentReleases(view.agentReleases)
+    #expect(inbox.view().agentReleases == ["w:p2"])
+}

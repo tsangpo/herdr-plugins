@@ -174,3 +174,37 @@ private func receive(_ state: inout SessionState, _ event: EditorEvent, _ source
         try runCommand(executable: "/bin/sh", arguments: ["-c", "echo failure >&2; exit 7"], environment: [:])
     }
 }
+
+@Test func configuredExitSourceReturnsShellWithoutReplacingEditorMemories() throws {
+    var state = SessionState.empty
+    state.exitInputSourceID = abc
+    _ = try receive(&state, event(1, .start), "Pinyin")
+    state.editorSwitchSucceeded(paneID: "p")
+    _ = try receive(&state, event(2, .mode, .edit), abc)
+    state.editorSwitchSucceeded(paneID: "p")
+    #expect(try receive(&state, event(3, .suspend, .edit), "Japanese") == abc)
+    #expect(state.editors["p"]?.beforeInputSourceID == "Pinyin")
+    #expect(state.editors["p"]?.editingInputSourceID == "Japanese")
+    #expect(try receive(&state, event(4, .resume, .edit), abc) == "Japanese")
+    state.editorSwitchSucceeded(paneID: "p")
+    #expect(try receive(&state, event(5, .exit), "Japanese") == abc)
+    // Background exits still never request a switch.
+    var background = SessionState.empty
+    background.exitInputSourceID = abc
+    _ = try receive(&background, event(1, .start), nil)
+    #expect(try receive(&background, event(2, .exit), nil) == nil)
+}
+
+@Test func agentReleaseRemembersExitSourceUnlessEditorIsActive() throws {
+    var state = SessionState.empty
+    state.panes["p"] = PaneMemory("Pinyin", pane: pane)
+    #expect(state.agentReleased(pane: pane) == nil)
+    #expect(state.panes["p"]?.inputSourceID == "Pinyin")
+    state.exitInputSourceID = abc
+    #expect(state.agentReleased(pane: pane) == abc)
+    #expect(state.panes["p"]?.inputSourceID == abc)
+    _ = try receive(&state, event(1, .start), nil)
+    state.panes["p"] = PaneMemory("Pinyin", pane: pane)
+    #expect(state.agentReleased(pane: pane) == nil)
+    #expect(state.panes["p"]?.inputSourceID == "Pinyin")
+}

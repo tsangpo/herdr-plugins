@@ -16,6 +16,7 @@
 - Match rules case-sensitively against foreground process `name` or the basename of `argv0`, in array order.
 - Capture the departure input source immediately when a focus event starts. Keep the 100ms stable window, session focus lock, and global switch lock before restoring the revalidated current pane.
 - A successfully applied rule becomes pane memory; a later manual input-source change overrides it when leaving the pane.
+- Optional `exitInputSourceID` replaces the shell source on Neovim exit/suspend and on Herdr `pane.agent_detected` with `released: true` (local hook and remote subscription). It becomes pane memory and is copied into `SessionState` after loading, never persisted; it must not replace editor `before`/`editing` memories, and background panes never switch.
 - Evaluate command rules only on focus. Clean state on pane/tab/workspace close and migrate it on pane move.
 - Log Herdr/config/TIS failures and leave the current source unchanged. Never overwrite corrupt config or state.
 

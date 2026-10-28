@@ -99,7 +99,7 @@ extension SessionState {
         switch event.event {
         case .suspend, .exit:
             memory.lifecycle = event.event == .exit ? .exited : .suspended
-            target = observedInputSourceID == nil ? nil : memory.beforeInputSourceID
+            target = observedInputSourceID == nil ? nil : shellInputSource(memory)
         default:
             // A late mode notification must not undo a suspend.
             if memory.lifecycle == .suspended, event.event != .resume {

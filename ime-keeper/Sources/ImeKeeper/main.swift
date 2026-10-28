@@ -17,6 +17,7 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
 
     try FileLock.with(path: store.stateLockPath) {
         var state = try store.load()
+        state.exitInputSourceID = configuration.exitInputSourceID
         let owner = InputOwner(directory: store.directory)
         if !owner.isCurrent(store.ownerID) { state.relinquishInputObservation() }
         if state.currentPane?.paneID != pane.paneID {
@@ -37,7 +38,7 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
                 desired = state.editors[pane.paneID]?.targetOnFocus(baseInputSourceID: desired ?? currentSource)
             } else if kill(editor.pid, 0) != 0 && errno == ESRCH {
                 // An ungraceful editor exit must not leave ABC as shell memory.
-                desired = editor.beforeInputSourceID ?? desired
+                desired = state.shellInputSource(editor) ?? desired
                 state.editors.removeValue(forKey: pane.paneID)
             } else {
                 state.editors[pane.paneID]?.lifecycle = .suspended
@@ -105,11 +106,44 @@ private func mutateState(_ mutation: (inout SessionState) throws -> Void) throws
     }
 }
 
+/// Herdr reports an agent's exit as `released`; its start carries no flag.
+private func handleAgentReleased(paneID: String) throws {
+    let configuration = try loadConfiguration()
+    guard configuration.exitInputSourceID != nil else { return }
+    let store = try Store()
+    try FileLock.with(path: store.switchLockPath) {
+        try FileLock.with(path: store.stateLockPath) {
+            let api = try localAPI()
+            var state = try store.load()
+            state.exitInputSourceID = configuration.exitInputSourceID
+            let current = try api.currentPane()
+            let pane = current.paneID == paneID ? current : try api.pane(id: paneID)
+            guard let target = state.agentReleased(pane: pane) else { return }
+            // A background agent exit only updates memory for the next focus.
+            if current.paneID == paneID, try localInputAllowed(store: store) {
+                let owner = InputOwner(directory: store.directory)
+                if !owner.isCurrent(store.ownerID) { state.relinquishInputObservation() }
+                do {
+                    if try currentInputSourceID() != target { try selectInputSource(target) }
+                    try owner.claim(store.ownerID)
+                    state.currentPane = pane
+                    state.entryInputSourceID = target
+                } catch { log(String(describing: error)) }
+            }
+            try store.save(state)
+        }
+    }
+}
+
 private func handleEvent() throws {
     let name = try requireEnvironment("HERDR_PLUGIN_EVENT")
     if name == "pane.focused" { try handleFocus(); return }
     let data = try eventData()
     switch name {
+    case "pane.agent_detected":
+        guard data["released"] as? Bool == true else { return }
+        guard let id = data["pane_id"] as? String else { throw KeeperError.message("pane.agent_detected is missing pane_id") }
+        try handleAgentReleased(paneID: id)
     case "pane.closed":
         guard let id = data["pane_id"] as? String else { throw KeeperError.message("pane.closed is missing pane_id") }
         try mutateState { $0.closePane(id) }
@@ -178,12 +212,13 @@ private func handleEditorEvent() throws {
     }
     let event = try JSONDecoder().decode(EditorEvent.self, from: data)
     try event.validate()
-    _ = try loadConfiguration()
+    let configuration = try loadConfiguration()
     let store = try Store()
     try FileLock.with(path: store.switchLockPath) {
         try FileLock.with(path: store.stateLockPath) {
             let api = try localAPI()
             var state = try store.load()
+            state.exitInputSourceID = configuration.exitInputSourceID
             let session = EditorSession(sourceID: "local", sessionID: store.key)
             let mayControl = try localInputAllowed(store: store)
             let owner = InputOwner(directory: store.directory)
@@ -211,8 +246,8 @@ private func handleEditorEvent() throws {
                 event, session: session, pane: pane, observedInputSourceID: observed
             )
             guard state.editors[pane.paneID] != previousEditor else { return }
-            if let before = state.editors[pane.paneID]?.beforeInputSourceID {
-                state.panes[pane.paneID] = PaneMemory(before, pane: pane)
+            if let editor = state.editors[pane.paneID], let shell = state.shellInputSource(editor) {
+                state.panes[pane.paneID] = PaneMemory(shell, pane: pane)
             }
             var switchError: Error?
             if let target, try api.currentPane().paneID == pane.paneID {

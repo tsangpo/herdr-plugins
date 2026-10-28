@@ -110,13 +110,14 @@ extension SessionState {
     mutating func releaseRemoteEditor(paneID: String) -> String? {
         guard let editor = editors[paneID] else { return nil }
         let pending = editor.lifecycle == .active || editor.appliedMode != nil
-        if pending, let before = editor.beforeInputSourceID {
-            panes[paneID] = PaneMemory(before, pane: editor.pane)
+        let shell = shellInputSource(editor)
+        if pending, let shell {
+            panes[paneID] = PaneMemory(shell, pane: editor.pane)
         }
         if editor.lifecycle != .exited { editors[paneID]?.lifecycle = .suspended }
         // Retain dormant identity and memories for a verified resume, but do
         // not repeatedly overwrite a manual shell choice after restoring once.
-        return pending ? editor.beforeInputSourceID : nil
+        return pending ? shell : nil
     }
 }
 
@@ -134,11 +135,11 @@ extension SessionState {
                 if let observed, entering || editors[pane.paneID]?.appliedMode != editors[pane.paneID]?.mode {
                     desired = editors[pane.paneID]?.targetOnFocus(baseInputSourceID: desired ?? observed)
                 }
-            } else if editors[pane.paneID]?.appliedMode != nil {
-                desired = editors[pane.paneID]?.beforeInputSourceID ?? desired
+            } else if let editor = editors[pane.paneID], editor.appliedMode != nil {
+                desired = shellInputSource(editor) ?? desired
             }
-            if previous != editors[pane.paneID], let before = editors[pane.paneID]?.beforeInputSourceID {
-                panes[pane.paneID] = PaneMemory(before, pane: pane)
+            if previous != editors[pane.paneID], let editor = editors[pane.paneID], let shell = shellInputSource(editor) {
+                panes[pane.paneID] = PaneMemory(shell, pane: pane)
             }
         } else {
             if !entering, let observed { editors[pane.paneID]?.rememberEditingSource(observed) }

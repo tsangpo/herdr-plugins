@@ -180,6 +180,13 @@ struct HerdrAPI {
         return try parsePane(row)
     }
 
+    func pane(id: String) throws -> Pane {
+        guard let row = try request("pane.get", ["pane_id": id])["pane"] as? [String: Any] else {
+            throw KeeperError.message("pane.get response is missing pane")
+        }
+        return try parsePane(row)
+    }
+
     func foregroundProcesses(paneID: String) throws -> [ForegroundProcess] {
         guard let row = try request("pane.process_info", ["pane_id": paneID])["process_info"] as? [String: Any] else {
             throw KeeperError.message("pane.process_info response is missing process_info")
@@ -189,7 +196,7 @@ struct HerdrAPI {
 
     func subscribe() throws -> JSONSocket {
         let socket = try JSONSocket(path: path)
-        let names = ["pane.focused", "pane.updated", "pane.closed", "pane.moved", "pane.exited", "tab.closed", "workspace.closed"]
+        let names = ["pane.focused", "pane.updated", "pane.closed", "pane.moved", "pane.exited", "pane.agent_detected", "tab.closed", "workspace.closed"]
         try socket.send(["id": "ime-events", "method": "events.subscribe",
                          "params": ["subscriptions": names.map { ["type": $0] }]])
         guard let response = try socket.read(),

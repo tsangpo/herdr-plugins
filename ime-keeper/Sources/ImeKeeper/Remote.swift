@@ -14,6 +14,7 @@ final class RemoteInbox {
     private var focusSamplePending = false
     private var modeReceipts: [String: (RemotePaneObservation, Date)] = [:]
     private var identityRevision: UInt64 = 0
+    private var agentReleases: Set<String> = []
 
     struct View {
         let revision: UInt64
@@ -23,11 +24,22 @@ final class RemoteInbox {
         let departure: String?
         let focusSamplePending: Bool
         let identityRevision: UInt64
+        var agentReleases: Set<String> = []
     }
     func view() -> View {
         lock.lock(); defer { lock.unlock() }
         return View(revision: revision, stopped: stopped, failure: failure, focusAt: focusAt,
-                    departure: departure, focusSamplePending: focusSamplePending, identityRevision: identityRevision)
+                    departure: departure, focusSamplePending: focusSamplePending, identityRevision: identityRevision,
+                    agentReleases: agentReleases)
+    }
+    /// Pending until a reconciliation commits them, so a rejected candidate retries.
+    func releaseAgent(paneID: String) {
+        lock.lock(); defer { lock.unlock() }
+        agentReleases.insert(paneID)
+    }
+    func consumeAgentReleases(_ released: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
+        agentReleases.subtract(released)
     }
     // Invalidate BEFORE dispatching to the main thread. Otherwise an already
     // queued switch can run first and become the supposed departure source.
@@ -219,6 +231,10 @@ final class RemoteBridge {
                                 }
                                 inbox.finishFocusSample(sample, source: source)
                             } else {
+                                if kind == "pane_agent_detected", data["released"] as? Bool == true,
+                                   let paneID = data["pane_id"] as? String {
+                                    inbox.releaseAgent(paneID: paneID)
+                                }
                                 let observation = (data["pane"] as? [String: Any]).flatMap(RemotePaneObservation.init)
                                 let lifecycle = observation?.tokens["ime_keeper_event"]
                                 inbox.invalidate(structural: kind != "pane_updated" || observation == nil
@@ -275,7 +291,9 @@ final class RemoteBridge {
             throw KeeperError.message("Herdr snapshot is missing panes")
         }
         let focusedID = snapshot["focused_pane_id"] as? String
+        let config = try loadConfiguration(directory: directories.config)
         var candidate = state
+        candidate.exitInputSourceID = config.exitInputSourceID
         let ownership = InputOwner(directory: store.directory)
         if !ownership.isCurrent(store.key) { candidate.relinquishInputObservation() }
         var terminals: [String: Pane] = [:]
@@ -293,6 +311,11 @@ final class RemoteBridge {
         let ids = Set(parsed.map { $0.pane.paneID })
         metadata.retain(panes: ids)
         for id in Set(candidate.panes.keys).union(candidate.editors.keys) where !ids.contains(id) { candidate.closePane(id) }
+        var agentTarget: String?
+        for (_, released, _) in parsed where view.agentReleases.contains(released.paneID) {
+            let target = candidate.agentReleased(pane: released)
+            if released.paneID == focusedID { agentTarget = target }
+        }
         let focused = parsed.first { $0.pane.paneID == focusedID }
         let focusedRow = focused?.row
         let pane = focused?.pane
@@ -315,9 +338,9 @@ final class RemoteBridge {
             state = candidate
             terminalPanes = terminals
             try stateWrites.save(state) { try store.save(state) }
+            inbox.consumeAgentReleases(view.agentReleases)
             return true
         }
-        let config = try loadConfiguration(directory: directories.config)
         guard let observation = RemotePaneObservation(row) else {
             throw KeeperError.message("invalid remote pane observation")
         }
@@ -339,7 +362,7 @@ final class RemoteBridge {
             processes = parseProcesses(info)
         }
         var desired = entering ? desiredInputSource(saved: candidate.panes[pane.paneID],
-            ruleInputSourceID: matchingInputSource(rules: config.rules, processes: processes)) : nil
+            ruleInputSourceID: matchingInputSource(rules: config.rules, processes: processes)) : agentTarget
         var valid = false
         if let event {
             valid = editorIsForeground(pid: event.pid, processes: processes) { pid in
@@ -417,6 +440,7 @@ final class RemoteBridge {
         state = candidate
         terminalPanes = terminals
         try stateWrites.save(state) { try store.save(state) }
+        inbox.consumeAgentReleases(view.agentReleases)
         return true
     }
 }

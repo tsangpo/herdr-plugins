@@ -8,6 +8,9 @@ struct Rule: Codable, Equatable {
 struct Configuration: Codable, Equatable {
     let version: Int
     let rules: [Rule]
+    /// Selected when an editor or agent TUI returns to the shell; nil restores
+    /// the editor's pre-editor source and leaves agent exits unchanged.
+    var exitInputSourceID: String? = nil
 
     static func decode(_ data: Data) throws -> Configuration {
         let value = try JSONDecoder().decode(Configuration.self, from: data)
@@ -45,8 +48,24 @@ struct SessionState: Codable, Equatable {
     var entryInputSourceID: String?
     var panes: [String: PaneMemory]
     var editors: [String: EditorMemory] = [:]
+    /// Copied from configuration after loading; never persisted.
+    var exitInputSourceID: String? = nil
 
     static let empty = SessionState(currentPane: nil, entryInputSourceID: nil, panes: [:])
+
+    /// The shell's source once an editor exits or suspends. Editor memories
+    /// are unchanged, so a resume still restores its editing source.
+    func shellInputSource(_ editor: EditorMemory) -> String? {
+        exitInputSourceID ?? editor.beforeInputSourceID
+    }
+
+    /// A Herdr-detected agent TUI released its pane. Returns the source to
+    /// select if the pane is focused; an active editor keeps its own policy.
+    mutating func agentReleased(pane: Pane) -> String? {
+        guard let exit = exitInputSourceID, editors[pane.paneID]?.lifecycle != .active else { return nil }
+        panes[pane.paneID] = PaneMemory(exit, pane: pane)
+        return exit
+    }
 
     mutating func rememberLeavingPane(currentInputSourceID: String) {
         guard let pane = currentPane else { return }
