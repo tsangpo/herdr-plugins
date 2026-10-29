@@ -352,14 +352,16 @@ final class RemoteBridge {
         }
         identityRevision = view.identityRevision
         var processes: [ForegroundProcess] = []
-        if remoteNeedsProcesses(event: event, entering: entering,
-                                saved: candidate.panes[pane.paneID], rules: config.rules) {
+        var inShell = false
+        if remoteNeedsProcesses(event: event, entering: entering, saved: candidate.panes[pane.paneID],
+                                rules: config.rules, detectsShell: config.shellInputSourceID != nil) {
             diagnostics.update { $0.processQueries += 1 }
             let processResult = try api.request("pane.process_info", ["pane_id": pane.paneID])
             guard let info = processResult["process_info"] as? [String: Any] else {
                 throw KeeperError.message("Herdr process response is missing process_info")
             }
             processes = parseProcesses(info)
+            inShell = shellIsForeground(info)
         }
         var desired = entering ? desiredInputSource(saved: candidate.panes[pane.paneID],
             ruleInputSourceID: matchingInputSource(rules: config.rules, processes: processes)) : agentTarget
@@ -389,8 +391,9 @@ final class RemoteBridge {
         }
         desired = try candidate.remoteFocusTarget(event: event, verified: valid, pane: pane, session: session,
                                                    entering: entering, observed: observed, ordinaryTarget: desired)
-        if entering, desired == nil, candidate.editors[pane.paneID]?.lifecycle != .active {
-            desired = config.shellInputSourceID
+        if entering, desired == nil || inShell, candidate.editors[pane.paneID]?.lifecycle != .active,
+           let shell = config.shellInputSourceID {
+            desired = shell
         }
         // Revalidate focus and metadata after process queries; never apply an
         // old snapshot over a newer mode or a focus event received meanwhile.

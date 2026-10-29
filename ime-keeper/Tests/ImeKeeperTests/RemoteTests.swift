@@ -404,3 +404,14 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     inbox.consumeAgentReleases(view.agentReleases)
     #expect(inbox.view().agentReleases == ["w:p2"])
 }
+
+@Test func foregroundShellIsDetectedFromItsProcessGroup() {
+    #expect(shellIsForeground(["shell_pid": 7263, "foreground_process_group_id": 7263]))
+    #expect(!shellIsForeground(["shell_pid": 7259, "foreground_process_group_id": 49357]))
+    #expect(!shellIsForeground(["shell_pid": 7263]))
+    #expect(!shellIsForeground([:]))
+    let saved = PaneMemory(inputSourceID: "pinyin", workspaceID: "w", tabID: "t")
+    #expect(!remoteNeedsProcesses(event: nil, entering: true, saved: saved, rules: []))
+    #expect(remoteNeedsProcesses(event: nil, entering: true, saved: saved, rules: [], detectsShell: true))
+    #expect(!remoteNeedsProcesses(event: nil, entering: false, saved: saved, rules: [], detectsShell: true))
+}

@@ -187,11 +187,15 @@ struct HerdrAPI {
         return try parsePane(row)
     }
 
-    func foregroundProcesses(paneID: String) throws -> [ForegroundProcess] {
+    func processInfo(paneID: String) throws -> [String: Any] {
         guard let row = try request("pane.process_info", ["pane_id": paneID])["process_info"] as? [String: Any] else {
             throw KeeperError.message("pane.process_info response is missing process_info")
         }
-        return parseProcesses(row)
+        return row
+    }
+
+    func foregroundProcesses(paneID: String) throws -> [ForegroundProcess] {
+        parseProcesses(try processInfo(paneID: paneID))
     }
 
     func subscribe() throws -> JSONSocket {

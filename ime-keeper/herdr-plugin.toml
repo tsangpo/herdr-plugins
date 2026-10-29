@@ -1,6 +1,6 @@
 id = "tsangpo.ime-keeper"
 name = "IME Keeper"
-version = "0.7.0"
+version = "0.8.0"
 min_herdr_version = "0.9.3"
 description = "Remember local and remote pane input sources and switch with Neovim modes on macOS"
 platforms = ["macos"]

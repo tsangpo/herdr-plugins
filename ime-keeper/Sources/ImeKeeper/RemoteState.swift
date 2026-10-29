@@ -68,8 +68,16 @@ func parseProcesses(_ value: [String: Any]) -> [ForegroundProcess] {
     }
 }
 
-func remoteNeedsProcesses(event: EditorEvent?, entering: Bool, saved: PaneMemory?, rules: [Rule]) -> Bool {
-    event != nil || (entering && saved == nil && !rules.isEmpty)
+/// The pane's own shell owns the terminal; a nested shell or any program does not.
+func shellIsForeground(_ info: [String: Any]) -> Bool {
+    guard let shell = info["shell_pid"] as? NSNumber,
+          let group = info["foreground_process_group_id"] as? NSNumber else { return false }
+    return shell == group
+}
+
+func remoteNeedsProcesses(event: EditorEvent?, entering: Bool, saved: PaneMemory?, rules: [Rule],
+                          detectsShell: Bool = false) -> Bool {
+    event != nil || (entering && (detectsShell || (saved == nil && !rules.isEmpty)))
 }
 
 extension SessionState {

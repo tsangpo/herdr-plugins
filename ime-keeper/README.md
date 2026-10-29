@@ -26,11 +26,13 @@ Edit `config.json` to set first-focus defaults. Rules are case-sensitive, evalua
 }
 ```
 
-Shells start in ABC. A newly focused pane with no saved source and no matching
-rule selects ABC. Whenever a TUI returns to the shell, IME Keeper selects ABC and
+Shells use ABC. Focusing a pane whose own shell is in the foreground selects ABC,
+even if you chose another source there before; a pane running a program restores
+its saved source or rule. A newly focused pane with no saved source and no
+matching rule also selects ABC. Whenever a TUI returns to the shell, IME Keeper selects ABC and
 remembers it for the pane. This covers Neovim exit or suspend, and Herdr-detected
 agents such as `claude`, `codex` or `opencode` exiting. Set `disableShellABC` to
-`true` to turn this off: such new panes then keep the current source, Neovim
+`true` to turn this off: shell panes then restore their saved source, new panes keep the current source, Neovim
 restores the source from before it started, and agent exits change nothing.
 
 ```json

@@ -13,7 +13,8 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
     let pane = try api.currentPane()
     let currentSource = try currentInputSourceID()
     let configuration = try loadConfiguration()
-    let processes = try api.foregroundProcesses(paneID: pane.paneID)
+    let info = try api.processInfo(paneID: pane.paneID)
+    let processes = parseProcesses(info)
 
     try FileLock.with(path: store.stateLockPath) {
         var state = try store.load()
@@ -45,8 +46,10 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
                 state.editors[pane.paneID]?.appliedMode = nil
             }
         }
-        // A pane without memory or a matching rule starts in the shell source.
-        if desired == nil, !hasActiveEditor { desired = configuration.shellInputSourceID }
+        // A foreground shell always gets the shell source; otherwise it is only
+        // the default for a pane without memory or a matching rule.
+        if !hasActiveEditor, let shell = configuration.shellInputSourceID,
+           desired == nil || shellIsForeground(info) { desired = shell }
         guard try api.currentPane().paneID == pane.paneID, try localInputAllowed(store: store) else { return }
         var enteredSource = currentSource
         if let desired {
