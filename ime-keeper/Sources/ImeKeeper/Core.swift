@@ -8,12 +8,14 @@ struct Rule: Codable, Equatable {
 struct Configuration: Codable, Equatable {
     let version: Int
     let rules: [Rule]
-    /// ABC is selected when an editor or agent TUI returns to the shell. When
-    /// disabled, Neovim restores its pre-editor source and agent exits are ignored.
-    var disableExitABC: Bool? = nil
+    /// ABC is selected for a new pane without memory or a matching rule, and
+    /// when an editor or agent TUI returns to the shell. When disabled, such panes
+    /// keep the current source, Neovim restores its pre-editor source and agent
+    /// exits are ignored.
+    var disableShellABC: Bool? = nil
 
-    var exitInputSourceID: String? {
-        disableExitABC == true ? nil : EditorMemory.commandInputSourceID
+    var shellInputSourceID: String? {
+        disableShellABC == true ? nil : EditorMemory.commandInputSourceID
     }
 
     static func decode(_ data: Data) throws -> Configuration {
@@ -53,20 +55,20 @@ struct SessionState: Codable, Equatable {
     var panes: [String: PaneMemory]
     var editors: [String: EditorMemory] = [:]
     /// Copied from configuration after loading; never persisted.
-    var exitInputSourceID: String? = nil
+    var shellInputSourceID: String? = nil
 
     static let empty = SessionState(currentPane: nil, entryInputSourceID: nil, panes: [:])
 
     /// The shell's source once an editor exits or suspends. Editor memories
     /// are unchanged, so a resume still restores its editing source.
     func shellInputSource(_ editor: EditorMemory) -> String? {
-        exitInputSourceID ?? editor.beforeInputSourceID
+        shellInputSourceID ?? editor.beforeInputSourceID
     }
 
     /// A Herdr-detected agent TUI released its pane. Returns the source to
     /// select if the pane is focused; an active editor keeps its own policy.
     mutating func agentReleased(pane: Pane) -> String? {
-        guard let exit = exitInputSourceID, editors[pane.paneID]?.lifecycle != .active else { return nil }
+        guard let exit = shellInputSourceID, editors[pane.paneID]?.lifecycle != .active else { return nil }
         panes[pane.paneID] = PaneMemory(exit, pane: pane)
         return exit
     }

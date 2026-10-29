@@ -10,13 +10,13 @@
 
 - Store user configuration in `HERDR_PLUGIN_CONFIG_DIR/config.json` and runtime state in `HERDR_PLUGIN_STATE_DIR`; never write state into the plugin checkout.
 - Isolate state by a stable hash of `HERDR_SOCKET_PATH` and write it atomically.
-- For panes without a verified active Neovim instance, restore in this order: saved pane source, first matching command rule, current source unchanged.
+- For panes without a verified active Neovim instance, restore in this order: saved pane source, first matching command rule, then ABC (`shellInputSourceID`); with `disableShellABC`, the current source unchanged.
 - For a verified foreground Neovim instance, apply editor mode policy before ordinary pane restoration. Keep its editing and pre-editor input-source memories separate; forced ABC must not replace either memory.
 - Keep mode events transport-independent and versioned. The current local adapter validates pane/PID and uses the existing socket-scoped store. Remote support is a connection-lived IME Keeper launcher around unmodified `herdr --remote`, not a Herdr source change or system daemon.
 - Match rules case-sensitively against foreground process `name` or the basename of `argv0`, in array order.
 - Capture the departure input source immediately when a focus event starts. Keep the 100ms stable window, session focus lock, and global switch lock before restoring the revalidated current pane.
 - A successfully applied rule becomes pane memory; a later manual input-source change overrides it when leaving the pane.
-- Unless `disableExitABC` is true, ABC (`exitInputSourceID`) replaces the shell source on Neovim exit/suspend and on Herdr `pane.agent_detected` with `released: true` (local hook and remote subscription). It becomes pane memory and is copied into `SessionState` after loading, never persisted; it must not replace editor `before`/`editing` memories, and background panes never switch.
+- Unless `disableShellABC` is true, ABC (`shellInputSourceID`) is the default for panes without memory or rule, and replaces the shell source on Neovim exit/suspend and on Herdr `pane.agent_detected` with `released: true` (local hook and remote subscription). It becomes pane memory and is copied into `SessionState` after loading, never persisted; it must not replace editor `before`/`editing` memories, and background panes never switch.
 - Evaluate command rules only on focus. Clean state on pane/tab/workspace close and migrate it on pane move.
 - Log Herdr/config/TIS failures and leave the current source unchanged. Never overwrite corrupt config or state.
 

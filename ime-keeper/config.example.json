@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "disableExitABC": false,
+  "disableShellABC": false,
   "rules": [
     {
       "command": "codex",

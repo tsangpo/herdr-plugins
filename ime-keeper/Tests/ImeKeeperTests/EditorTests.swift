@@ -177,7 +177,7 @@ private func receive(_ state: inout SessionState, _ event: EditorEvent, _ source
 
 @Test func configuredExitSourceReturnsShellWithoutReplacingEditorMemories() throws {
     var state = SessionState.empty
-    state.exitInputSourceID = abc
+    state.shellInputSourceID = abc
     _ = try receive(&state, event(1, .start), "Pinyin")
     state.editorSwitchSucceeded(paneID: "p")
     _ = try receive(&state, event(2, .mode, .edit), abc)
@@ -190,7 +190,7 @@ private func receive(_ state: inout SessionState, _ event: EditorEvent, _ source
     #expect(try receive(&state, event(5, .exit), "Japanese") == abc)
     // Background exits still never request a switch.
     var background = SessionState.empty
-    background.exitInputSourceID = abc
+    background.shellInputSourceID = abc
     _ = try receive(&background, event(1, .start), nil)
     #expect(try receive(&background, event(2, .exit), nil) == nil)
 }
@@ -200,7 +200,7 @@ private func receive(_ state: inout SessionState, _ event: EditorEvent, _ source
     state.panes["p"] = PaneMemory("Pinyin", pane: pane)
     #expect(state.agentReleased(pane: pane) == nil)
     #expect(state.panes["p"]?.inputSourceID == "Pinyin")
-    state.exitInputSourceID = abc
+    state.shellInputSourceID = abc
     #expect(state.agentReleased(pane: pane) == abc)
     #expect(state.panes["p"]?.inputSourceID == abc)
     _ = try receive(&state, event(1, .start), nil)

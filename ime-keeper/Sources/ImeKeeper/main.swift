@@ -17,7 +17,7 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
 
     try FileLock.with(path: store.stateLockPath) {
         var state = try store.load()
-        state.exitInputSourceID = configuration.exitInputSourceID
+        state.shellInputSourceID = configuration.shellInputSourceID
         let owner = InputOwner(directory: store.directory)
         if !owner.isCurrent(store.ownerID) { state.relinquishInputObservation() }
         if state.currentPane?.paneID != pane.paneID {
@@ -45,6 +45,8 @@ private func focusOnce(store: Store, departureInputSourceID: String) throws {
                 state.editors[pane.paneID]?.appliedMode = nil
             }
         }
+        // A pane without memory or a matching rule starts in the shell source.
+        if desired == nil, !hasActiveEditor { desired = configuration.shellInputSourceID }
         guard try api.currentPane().paneID == pane.paneID, try localInputAllowed(store: store) else { return }
         var enteredSource = currentSource
         if let desired {
@@ -109,13 +111,13 @@ private func mutateState(_ mutation: (inout SessionState) throws -> Void) throws
 /// Herdr reports an agent's exit as `released`; its start carries no flag.
 private func handleAgentReleased(paneID: String) throws {
     let configuration = try loadConfiguration()
-    guard configuration.exitInputSourceID != nil else { return }
+    guard configuration.shellInputSourceID != nil else { return }
     let store = try Store()
     try FileLock.with(path: store.switchLockPath) {
         try FileLock.with(path: store.stateLockPath) {
             let api = try localAPI()
             var state = try store.load()
-            state.exitInputSourceID = configuration.exitInputSourceID
+            state.shellInputSourceID = configuration.shellInputSourceID
             let current = try api.currentPane()
             let pane = current.paneID == paneID ? current : try api.pane(id: paneID)
             guard let target = state.agentReleased(pane: pane) else { return }
@@ -218,7 +220,7 @@ private func handleEditorEvent() throws {
         try FileLock.with(path: store.stateLockPath) {
             let api = try localAPI()
             var state = try store.load()
-            state.exitInputSourceID = configuration.exitInputSourceID
+            state.shellInputSourceID = configuration.shellInputSourceID
             let session = EditorSession(sourceID: "local", sessionID: store.key)
             let mayControl = try localInputAllowed(store: store)
             let owner = InputOwner(directory: store.directory)

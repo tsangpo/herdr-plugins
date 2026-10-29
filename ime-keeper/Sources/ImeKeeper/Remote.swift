@@ -293,7 +293,7 @@ final class RemoteBridge {
         let focusedID = snapshot["focused_pane_id"] as? String
         let config = try loadConfiguration(directory: directories.config)
         var candidate = state
-        candidate.exitInputSourceID = config.exitInputSourceID
+        candidate.shellInputSourceID = config.shellInputSourceID
         let ownership = InputOwner(directory: store.directory)
         if !ownership.isCurrent(store.key) { candidate.relinquishInputObservation() }
         var terminals: [String: Pane] = [:]
@@ -389,6 +389,9 @@ final class RemoteBridge {
         }
         desired = try candidate.remoteFocusTarget(event: event, verified: valid, pane: pane, session: session,
                                                    entering: entering, observed: observed, ordinaryTarget: desired)
+        if entering, desired == nil, candidate.editors[pane.paneID]?.lifecycle != .active {
+            desired = config.shellInputSourceID
+        }
         // Revalidate focus and metadata after process queries; never apply an
         // old snapshot over a newer mode or a focus event received meanwhile.
         diagnostics.update { $0.currentQueries += 1 }

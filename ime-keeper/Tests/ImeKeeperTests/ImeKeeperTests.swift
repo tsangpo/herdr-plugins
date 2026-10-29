@@ -65,12 +65,12 @@ import Testing
 
 @Test func exitABCIsDefaultAndSkippedInState() throws {
     let abc = EditorMemory.commandInputSourceID
-    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[]}"#.utf8)).exitInputSourceID == abc)
-    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[],"disableExitABC":false}"#.utf8)).exitInputSourceID == abc)
-    let config = try Configuration.decode(Data(#"{"version":1,"rules":[],"disableExitABC":true}"#.utf8))
-    #expect(config.exitInputSourceID == nil)
+    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[]}"#.utf8)).shellInputSourceID == abc)
+    #expect(try Configuration.decode(Data(#"{"version":1,"rules":[],"disableShellABC":false}"#.utf8)).shellInputSourceID == abc)
+    let config = try Configuration.decode(Data(#"{"version":1,"rules":[],"disableShellABC":true}"#.utf8))
+    #expect(config.shellInputSourceID == nil)
     var state = SessionState.empty
-    state.exitInputSourceID = "ABC"
+    state.shellInputSourceID = "ABC"
     let decoded = try JSONDecoder().decode(SessionState.self, from: encodedJSON(state))
-    #expect(decoded.exitInputSourceID == nil)
+    #expect(decoded.shellInputSourceID == nil)
 }

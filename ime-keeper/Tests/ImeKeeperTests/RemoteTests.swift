@@ -389,7 +389,7 @@ private func tokens(sequence: UInt64 = 1, instance: String = "nvim-1", event: St
     let session = EditorSession(sourceID: "ssh:host", sessionID: "s")
     let abc = EditorMemory.commandInputSourceID
     var state = SessionState.empty
-    state.exitInputSourceID = abc
+    state.shellInputSourceID = abc
     let start = try #require(try remoteEditorEvent(tokens: tokens(mode: "edit")))
     #expect(try state.receiveRemoteEditor(start, pane: a, session: session, observed: "pinyin") == "pinyin")
     state.editorSwitchSucceeded(paneID: a.paneID)
